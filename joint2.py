@@ -1,6 +1,7 @@
 
 import os
 import json
+import re
 import pandas as pd
 import duckdb
 import streamlit as st
@@ -36,7 +37,7 @@ Rules:
 - If date-like columns exist, consider grouping by day/week/month (using DuckDB functions like date_trunc('month', col)).
 - Keep the answer short and business-oriented—no causal claims.
 
-Return your answer inside ONE and only ONE ```json block with the following keys:
+Return ONLY a json object (no backticks, no markdown, no extra text) with the following keys:
 {
   "sql": "DuckDB SQL or empty string if not possible",
   "narrative": "concise business summary of what this query returns",
@@ -58,7 +59,7 @@ Task:
 - Keep `data` as the table name and use only existing columns.
 - If feedback requires changes that are impossible with the schema, return sql="" and explain briefly.
 
-Return ONE ```json block with the same keys as before (sql, narrative, chart_suggestion, followups).
+Return ONLY a json object (no backticks, no markdown, no extra text) with the same keys as before (sql, narrative, chart_suggestion, followups).
 """
 
 # ===================== UI SETUP =====================
@@ -72,6 +73,7 @@ with st.sidebar:
     api_key = st.text_input("OpenAI API Key", value=OPENAI_API_KEY, type="password")
     show_schema = st.checkbox("Show inferred schema", value=True)
     show_sql = st.checkbox("Show SQL in replies", value=True)
+    debug_raw = st.checkbox("Debug: show raw model replies on parse errors", value=False)
 
 # ===================== HELPERS =====================
 def infer_schema(df: pd.DataFrame, sample_rows: int = 5) -> str:
@@ -83,28 +85,62 @@ def infer_schema(df: pd.DataFrame, sample_rows: int = 5) -> str:
         lines.append(f"- {col} ({dtype})  samples: {sample_list}")
     return "\\n".join(lines)
 
-def openai_chat(system_prompt: str, user_payload: str, model_name: str, key: str) -> str:
+def openai_chat(system_prompt: str, user_payload: str, model_name: str, key: str, require_json: bool = False) -> str:
     if not _OPENAI_AVAILABLE:
         raise RuntimeError("OpenAI SDK not installed. Run: pip install openai")
     if not key:
         raise RuntimeError("Missing OPENAI_API_KEY. Provide it in the sidebar.")
     client = OpenAI(api_key=key)
-    resp = client.chat.completions.create(
-        model=model_name,
-        messages=[
+    kwargs = dict(model=model_name, messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_payload},
-        ],
-        temperature=0.1,
-    )
-    return resp.choices[0].message.content
+        ], temperature=0.1)
+    # Try to force json_object; if it fails, fallback without
+    if require_json:
+        try:
+            kwargs["response_format"] = {"type": "json_object"}
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content
+        except Exception:
+            # Fallback if model doesn't support response_format
+            kwargs.pop("response_format", None)
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content
+    else:
+        resp = client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content
 
 def extract_json_block(text: str) -> str:
     if not text:
         return ""
-    import re
     m = re.search(r"```json\\s*(\\{.*?\\})\\s*```", text, flags=re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else ""
+
+def parse_ba_json(text: str):
+    """Robust parsing: direct JSON -> fenced block -> greedy braces slice."""
+    if not text:
+        return None
+    # 1) try direct parse
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    # 2) try fenced
+    fenced = extract_json_block(text)
+    if fenced:
+        try:
+            return json.loads(fenced)
+        except Exception:
+            pass
+    # 3) greedy slice between first { and last }
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end+1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            return None
+    return None
 
 def run_duckdb(df: pd.DataFrame, sql: str) -> pd.DataFrame:
     con = duckdb.connect(database=":memory:")
@@ -187,15 +223,15 @@ def build_condensed_history(max_pairs: int = 3) -> str:
     strs = []
     count_pairs = 0
     # Walk from end to start
-    for t in reversed(st.session_state.messages):
+    for i in range(len(st.session_state.messages)-1, -1, -1):
+        t = st.session_state.messages[i]
         if t["role"] == "assistant":
-            # assistant first, then the preceding user, to form a pair
             a_txt = t.get("narrative") or t.get("content") or ""
             strs.append(f"ASSISTANT: {a_txt}")
             # find previous user turn
-            for t2 in reversed(st.session_state.messages[:st.session_state.messages.index(t)]):
-                if t2["role"] == "user":
-                    strs.append(f"USER: {t2.get('content','')}")
+            for j in range(i-1, -1, -1):
+                if st.session_state.messages[j]["role"] == "user":
+                    strs.append(f"USER: {st.session_state.messages[j].get('content','')}")
                     break
             count_pairs += 1
             if count_pairs >= max_pairs:
@@ -218,15 +254,13 @@ SCHEMA for `data`:
 CHAT LOG (most recent pairs):
 {history if history else '(none)'}
 """
-    raw = openai_chat(SYSTEM_BA_FIN, payload, model, api_key)
-    jtxt = extract_json_block(raw)
-    if not jtxt:
+    raw = openai_chat(SYSTEM_BA_FIN, payload, model, api_key, require_json=True)
+    ba = parse_ba_json(raw)
+    if ba is None:
         st.error("BA did not return valid JSON.")
-        return
-    try:
-        ba = json.loads(jtxt)
-    except Exception:
-        st.error("Could not parse BA JSON.")
+        if debug_raw:
+            with st.expander("Raw model reply"):
+                st.write(raw)
         return
 
     sql = (ba.get("sql") or "").strip()
@@ -282,15 +316,13 @@ PRIOR RESULT (CSV sample):
 USER FEEDBACK:
 {feedback}
 """
-    raw = openai_chat(SYSTEM_BA_REVISE, payload, model, api_key)
-    jtxt = extract_json_block(raw)
-    if not jtxt:
+    raw = openai_chat(SYSTEM_BA_REVISE, payload, model, api_key, require_json=True)
+    ba2 = parse_ba_json(raw)
+    if ba2 is None:
         st.error("BA (Reviser) did not return valid JSON.")
-        return
-    try:
-        ba2 = json.loads(jtxt)
-    except Exception:
-        st.error("Could not parse revised BA JSON.")
+        if debug_raw:
+            with st.expander("Raw model reply (revise)"):
+                st.write(raw)
         return
 
     sql2 = (ba2.get("sql") or "").strip()
