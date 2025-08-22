@@ -1,78 +1,105 @@
-
 import os
 import json
-import time
+import re
 import pandas as pd
 import duckdb
 import streamlit as st
 
-# ========== CONFIG ==========
+# ===================== CONFIG =====================
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-SYSTEM_DS = r'''
-You are “Telco/Data Scientist Agent.”
-Task: Given a user/BA spec and the SCHEMA (table name `data`), output a SINGLE DuckDB SQL that answers the spec.
-Rules:
-- Use ONLY existing columns; table name MUST be `data`.
-- Be precise and auditable (counts, %, grouped stats).
-- If something requested is impossible with schema, set sql="" and explain briefly why in narrative.
-Output (STRICT) inside ONE ```json block:
-{
-  "sql": "DuckDB SQL or empty string",
-  "narrative": "1-2 sentences on what the SQL returns",
-  "chart_suggestion": {"type": "bar|line|area|scatter|none", "x": "col or null", "y": "col or null"}
-}
-'''
-
-SYSTEM_BA_PLANNER = r'''
-You are “Business Analyst Agent (Planner).”
-Task: Read USER QUESTION and SCHEMA. Clarify the business intent and produce a concrete analytic SPEC that the DS agent can implement.
-- Use ONLY columns that exist; if asked for unavailable concept (e.g., Region), pick the closest valid columns (e.g., State/Country) and state the substitution.
-- Define metric(s), group-bys, filters, and sort order when appropriate.
-Output inside ONE ```json block:
-{
-  "spec": "plain English spec the DS should implement",
-  "tl_dr": "1-2 sentence expected business takeaway to aim for"
-}
-'''
-
-SYSTEM_BA_INTERPRET = r'''
-You are “Business Analyst Agent (Interpreter).”
-Task: Given RESULT TABLE (CSV sample) and the DS narrative, write a concise, business-oriented interpretation with 3-6 bullets (findings, segments, risks).
-Do not speculate beyond the table. No causal claims.
-Output inside ONE ```json block:
-{
-  "insight_bullets": ["...", "...", "..."]
-}
-'''
-
-# Optional OpenAI SDK
+# Try OpenAI SDK (optional)
 try:
     from openai import OpenAI
     _OPENAI_AVAILABLE = True
 except Exception:
     _OPENAI_AVAILABLE = False
 
-# ========== UI ==========
-st.set_page_config(page_title="Agent Orchestrator: BA ↔ DS", layout="wide")
-st.title("🤝 Agent Orchestrator — Business Analyst ↔ Data Scientist")
+# ===================== SYSTEM PROMPTS =====================
+SYSTEM_DECIDER = r"""
+You are a router for a Financial BA chat app.
+You will receive:
+- SCHEMA,
+- CHAT HISTORY (chronological list of USER/ASSISTANT exchanges),
+- LAST_BA_JSON (sql/narrative of the latest answer),
+- LAST_RESULT_CSV (sample of last query output),
+- NEW_INPUT (the user's latest message).
+
+Decide whether NEW_INPUT is:
+- "feedback": instructions to change or refine the **immediately previous** answer/SQL,
+- "new_question": a fresh business question to analyze from scratch.
+
+Heuristics for "feedback": mentions like "instead", "add", "filter", "by month", "group", "use margin rate", "previous", "that chart/table", column names used in the last answer, or short imperative edits.
+If the user asks for different metrics, segments, or a new time range not clearly referring to the last answer, it is "new_question".
+
+Return ONLY a json object with:
+{
+  "mode": "feedback" | "new_question",
+  "normalized_question": "string (if mode=new_question else empty)",
+  "normalized_feedback": "string (if mode=feedback else empty)"
+}
+"""
+
+SYSTEM_BA_FIN = r"""
+You are the “Financial Business Analyst Agent (BA).”
+You must produce BOTH the business-facing answer and the precise DuckDB SQL that backs it.
+Assume a single table named `data` is already registered in DuckDB.
+
+Goals:
+- Focus on financial analysis (revenue, sales, amount, price, cost, discount, tax, margin, profit, ARPU, LTV, retention value) using ONLY existing columns.
+- Use the user’s question, the SCHEMA, and the CHAT HISTORY for context to choose the right metrics, filters, and group-bys.
+- Prefer time-series and segment breakdowns when date/period or categorical columns exist.
+- Be auditable: the SQL must exactly match what you describe in the narrative.
+- If a requested metric is impossible with the current schema, return an empty SQL string and explain briefly in the narrative.
+
+Rules:
+- Table name MUST be `data`.
+- Use ONLY columns that exist in the schema. Do not invent columns.
+- Derived metrics are allowed ONLY if all needed columns exist (e.g., revenue = price*quantity; margin = revenue - cost; margin_rate = margin/revenue when revenue>0).
+- If date-like columns exist, consider grouping by day/week/month (DuckDB: date_trunc('month', col)).
+- Keep the answer short and business-oriented—no causal claims.
+
+Return ONLY a json object (no backticks, no markdown, no extra text) with the following keys:
+{
+  "sql": "DuckDB SQL or empty string if not possible",
+  "narrative": "concise business summary of what this query returns",
+  "chart_suggestion": {"type": "bar|line|area|scatter|none", "x": "col or null", "y": "col or null"},
+  "followups": ["next question 1", "next question 2"]
+}
+"""
+
+SYSTEM_BA_REVISE = r"""
+You are the “Financial BA (Reviser).”
+You will receive:
+- The SCHEMA,
+- The CHAT HISTORY,
+- The prior BA JSON (with sql/narrative),
+- The prior RESULT sample (CSV),
+- The USER FEEDBACK.
+
+Task:
+- Revise/improve the previous SQL and narrative strictly based on the feedback and schema.
+- Keep `data` as the table name and use only existing columns.
+- If feedback requires changes that are impossible with the schema, return sql="" and explain briefly.
+
+Return ONLY a json object (no backticks, no markdown, no extra text) with the same keys as before (sql, narrative, chart_suggestion, followups).
+"""
+
+# ===================== UI SETUP =====================
+st.set_page_config(page_title="💼 Financial BA Agent (SQL + Feedback Chat)", layout="wide")
+st.title("💼 Financial BA Agent — Chat • SQL • Feedback")
 
 with st.sidebar:
     st.header("⚙️ Setup")
     uploaded = st.file_uploader("Upload CSV", type=["csv"], accept_multiple_files=False)
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     api_key = st.text_input("OpenAI API Key", value=OPENAI_API_KEY, type="password")
-    feedback_loop = st.checkbox("Enable 1 feedback loop (BA critiques DS then DS revises)", value=True)
     show_schema = st.checkbox("Show inferred schema", value=True)
+    show_sql = st.checkbox("Show SQL in replies", value=True)
+    debug_raw = st.checkbox("Debug: show raw model replies on parse errors", value=False)
 
-st.divider()
-
-user_q = st.text_area("Business question (for BA Planner)", height=100,
-                      placeholder="e.g., What's churn rate by Contract and InternetService?")
-run = st.button("Run BA → DS → Execute → BA Interpret", type="primary", use_container_width=True)
-
-# ========== Helpers ==========
+# ===================== HELPERS =====================
 def infer_schema(df: pd.DataFrame, sample_rows: int = 5) -> str:
     lines = []
     for col in df.columns:
@@ -82,155 +109,258 @@ def infer_schema(df: pd.DataFrame, sample_rows: int = 5) -> str:
         lines.append(f"- {col} ({dtype})  samples: {sample_list}")
     return "\n".join(lines)
 
-def openai_chat(system_prompt: str, user_payload: str, model_name: str, key: str) -> str:
+def openai_chat(system_prompt: str, user_payload: str, model_name: str, key: str, require_json: bool = False) -> str:
     if not _OPENAI_AVAILABLE:
         raise RuntimeError("OpenAI SDK not installed. Run: pip install openai")
     if not key:
         raise RuntimeError("Missing OPENAI_API_KEY. Provide it in the sidebar.")
     client = OpenAI(api_key=key)
-    resp = client.chat.completions.create(
-        model=model_name,
-        messages=[
+    kwargs = dict(model=model_name, messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_payload},
-        ],
-        temperature=0.1,
-    )
-    return resp.choices[0].message.content
+        ], temperature=0.1)
+    # Try to force json_object; if it fails, fallback without
+    if require_json:
+        try:
+            kwargs["response_format"] = {"type": "json_object"}
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content
+        except Exception:
+            kwargs.pop("response_format", None)
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content
+    else:
+        resp = client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content
 
 def extract_json_block(text: str) -> str:
     if not text:
         return ""
-    import re
     m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else ""
+
+def parse_ba_json(text: str):
+    """Robust parsing: direct JSON -> fenced block -> greedy braces slice."""
+    if not text:
+        return None
+    # 1) try direct parse
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    # 2) try fenced
+    fenced = extract_json_block(text)
+    if fenced:
+        try:
+            return json.loads(fenced)
+        except Exception:
+            pass
+    # 3) greedy slice between first { and last }
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end+1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            return None
+    return None
 
 def run_duckdb(df: pd.DataFrame, sql: str) -> pd.DataFrame:
     con = duckdb.connect(database=":memory:")
     con.register("data", df)
     return con.execute(sql).df()
 
-# Diagnostics container
-diag = {"planner_raw":"", "planner_json":{}, "ds_raw":"", "ds_json":{}, "ds_sql":"", "ds2_raw":"", "ds2_json":{}, "error":""}
+def df_to_snapshot(df: pd.DataFrame, limit: int = 50):
+    return df.head(min(limit, len(df))).to_dict(orient="list")
 
-# ========== Pipeline ==========
-if run:
-    status = st.status("🔁 Orchestrating BA ↔ DS …", state="running")
+def snapshot_to_df(snap: dict) -> pd.DataFrame:
     try:
-        if uploaded is None:
-            raise RuntimeError("Please upload a CSV first.")
-        df = pd.read_csv(uploaded)
-        schema_txt = infer_schema(df)
-        if show_schema:
-            with st.expander("📜 Inferred Schema", expanded=False):
-                st.code(schema_txt, language="markdown")
+        return pd.DataFrame(snap)
+    except Exception:
+        return pd.DataFrame()
 
-        # ---- 1) BA Planner
-        status.update(label="🧭 BA Planner drafting a spec…", state="running")
-        planner_user = f"USER QUESTION:\n{user_q}\n\nSCHEMA for `data`:\n{schema_txt}"
-        raw_plan = openai_chat(SYSTEM_BA_PLANNER, planner_user, model, api_key)
-        diag["planner_raw"] = raw_plan
-        j1 = extract_json_block(raw_plan)
-        if not j1:
-            raise RuntimeError("BA Planner did not return JSON.")
-        plan = json.loads(j1)
-        diag["planner_json"] = plan
-
-        st.subheader("BA Plan")
-        st.write(plan.get("spec","(no spec)"))
-        st.caption(plan.get("tl_dr",""))
-
-        # ---- 2) DS generates SQL
-        status.update(label="🧪 DS generating SQL…", state="running")
-        ds_user = f"SPEC from BA:\n{plan.get('spec','')}\n\nSCHEMA for `data`:\n{schema_txt}"
-        raw_ds = openai_chat(SYSTEM_DS, ds_user, model, api_key)
-        diag["ds_raw"] = raw_ds
-        j2 = extract_json_block(raw_ds)
-        if not j2:
-            raise RuntimeError("DS did not return JSON.")
-        ds = json.loads(j2)
-        diag["ds_json"] = ds
-        sql = (ds.get("sql") or "").strip()
-        diag["ds_sql"] = sql
-
-        # ---- 2.5) Optional Feedback loop
-        if feedback_loop and sql:
-            status.update(label="🔍 BA quick critique of SQL spec…", state="running")
-            critique_prompt = (
-                "You are BA. Briefly review this DS plan and SQL for business alignment with the spec. "
-                "If revision is needed, provide a single sentence 'revise:' instruction; else 'approve'.\n\n"
-                f"SPEC:\n{plan.get('spec','')}\n\nDS RESPONSE:\n{j2}"
-            )
-            crit_raw = openai_chat(
-                "You are a very concise BA reviewer. Respond in ONE paragraph.", critique_prompt, model, api_key
-            )
-            st.subheader("BA Review")
-            st.write(crit_raw)
-
-            if "revise:" in crit_raw.lower():
-                status.update(label="🛠️ DS revising based on BA feedback…", state="running")
-                ds_user2 = f"{ds_user}\n\nBA FEEDBACK:\n{crit_raw}\nReturn full JSON again."
-                raw_ds2 = openai_chat(SYSTEM_DS, ds_user2, model, api_key)
-                diag["ds2_raw"] = raw_ds2
-                j2b = extract_json_block(raw_ds2)
-                if j2b:
-                    ds2 = json.loads(j2b)
-                    diag["ds2_json"] = ds2
-                    sql = (ds2.get('sql') or sql).strip()
-
-        # ---- 3) Execute SQL
-        if not sql:
-            status.update(label="ℹ️ DS could not form safe SQL.", state="complete")
-            st.info(ds.get("narrative","DS could not form a safe SQL with given schema."))
-        else:
-            status.update(label="🏃 Running SQL…", state="running")
-            out = run_duckdb(df, sql)
-            status.update(label="✅ Execution complete", state="complete")
-
-            st.subheader("Executed SQL")
-            st.code(sql, language="sql")
-
-            st.subheader("Result")
-            st.dataframe(out, use_container_width=True)
-
-            # ---- 4) BA interprets results
-            status.update(label="🗣️ BA interpreting results…", state="running")
-            sample_csv = out.head(min(50, len(out))).to_csv(index=False)
-            interp_user = f"DS narrative: {ds.get('narrative','')}\n\nRESULT TABLE (CSV):\n{sample_csv}"
-            raw_interp = openai_chat(SYSTEM_BA_INTERPRET, interp_user, model, api_key)
-            j3 = extract_json_block(raw_interp)
-            insights = []
-            if j3:
-                insights = json.loads(j3).get("insight_bullets", [])
-            st.subheader("BA Insights")
-            for b in insights or ["(no insights)"]:
-                st.write("- " + b)
-
-            # Quick chart if model suggested
-            cs = (diag.get("ds2_json") or ds).get("chart_suggestion") or {}
-            if isinstance(cs, dict) and cs.get("type","none") != "none":
+def render_assistant_turn(turn: dict):
+    """Render an assistant turn: narrative, optional SQL, table, and chart."""
+    with st.chat_message("assistant"):
+        if turn.get("narrative"):
+            st.write(turn["narrative"])
+        if turn.get("sql") and st.session_state.get("show_sql_flag", True):
+            st.code(turn["sql"], language="sql")
+        if turn.get("result_snapshot"):
+            st.dataframe(snapshot_to_df(turn["result_snapshot"]), use_container_width=True)
+        cs = turn.get("chart_suggestion") or {}
+        out_df = snapshot_to_df(turn.get("result_snapshot") or {})
+        if isinstance(cs, dict) and cs.get("type", "none") != "none" and not out_df.empty:
+            x = cs.get("x"); y = cs.get("y")
+            if x in out_df.columns and y in out_df.columns:
                 st.subheader("Quick Chart")
-                x = cs.get("x"); y = cs.get("y")
-                ct = cs.get("type")
-                if x in out.columns and y in out.columns:
-                    if ct == "bar":
-                        st.bar_chart(out.set_index(x)[y])
-                    elif ct == "line":
-                        st.line_chart(out.set_index(x)[y])
-                    elif ct == "area":
-                        st.area_chart(out.set_index(x)[y])
-                    elif ct == "scatter":
-                        st.scatter_chart(out, x=x, y=y)
+                if cs["type"] == "bar":
+                    st.bar_chart(out_df.set_index(x)[y])
+                elif cs["type"] == "line":
+                    st.line_chart(out_df.set_index(x)[y])
+                elif cs["type"] == "area":
+                    st.area_chart(out_df.set_index(x)[y])
+                elif cs["type"] == "scatter":
+                    st.scatter_chart(out_df, x=x, y=y)
+        if turn.get("followups"):
+            st.caption("Follow-ups: " + " • ".join(turn["followups"]))
 
-        # ---- Diagnostics
-        with st.expander("🛠️ Orchestrator Diagnostics"):
-            st.write("BA Planner (raw):"); st.code(diag["planner_raw"] or "", language="markdown")
-            st.write("BA Planner (json):"); st.json(diag["planner_json"] or {})
-            st.write("DS (raw):"); st.code(diag["ds_raw"] or "", language="markdown")
-            st.write("DS (json):"); st.json(diag["ds_json"] or {})
-            if diag.get("ds2_raw"):
-                st.write("DS (revised raw):"); st.code(diag["ds2_raw"], language="markdown")
-                st.write("DS (revised json):"); st.json(diag["ds2_json"] or {})
-    except Exception as e:
-        status.update(label="❌ Error", state="error")
-        st.error(str(e))
+# ===================== SESSION STATE =====================
+if "messages" not in st.session_state:
+    st.session_state.messages = []  # list of dicts: {"role": "user"/"assistant", "content": str, ...}
+if "df" not in st.session_state:
+    st.session_state.df = None
+if "schema_txt" not in st.session_state:
+    st.session_state.schema_txt = ""
+if "last_ba_json" not in st.session_state:
+    st.session_state.last_ba_json = {}
+if "show_sql_flag" not in st.session_state:
+    st.session_state.show_sql_flag = True
+
+# Bind checkbox to session flag
+st.session_state.show_sql_flag = show_sql
+
+# ===================== LOAD DATA / SCHEMA =====================
+if uploaded is not None:
+    st.session_state.df = pd.read_csv(uploaded)
+    st.session_state.schema_txt = infer_schema(st.session_state.df)
+
+if st.session_state.df is None:
+    st.info("⬆️ Please upload a CSV to get started.")
+else:
+    if show_schema:
+        with st.expander("📜 Inferred Schema", expanded=False):
+            st.code(st.session_state.schema_txt, language="markdown")
+
+# ===================== CHAT HISTORY UTILS =====================
+def compile_chat_history(max_chars: int = 12000) -> str:
+    """Full chronological chat history (user prompts + assistant narratives), truncated to max_chars."""
+    parts = []
+    for t in st.session_state.messages:
+        if t["role"] == "user":
+            parts.append(f"USER: {t.get('content','')}")
+        else:
+            # Use concise narrative for history (not the whole table/SQL)
+            parts.append(f"ASSISTANT: {t.get('narrative') or t.get('content','')}")
+    text = "\n".join(parts)
+    if len(text) <= max_chars:
+        return text
+    # Truncate from the front to keep the most recent context
+    return text[-max_chars:]
+
+# ===================== CORE LOGIC (unified input) =====================
+def handle_user_input(user_text: str):
+    if st.session_state.df is None:
+        st.error("Please upload a CSV first.")
+        return
+
+    # 1) Decide whether it's feedback or a new question
+    chat_hist = compile_chat_history()
+    prior_json = json.dumps(st.session_state.last_ba_json or {}, ensure_ascii=False)
+    # Find last assistant result snapshot to CSV
+    last_assistant = None
+    for t in reversed(st.session_state.messages):
+        if t["role"] == "assistant":
+            last_assistant = t; break
+    prior_result_csv = ""
+    if last_assistant and last_assistant.get("result_snapshot"):
+        prior_result_csv = snapshot_to_df(last_assistant["result_snapshot"]).to_csv(index=False)
+
+    decider_payload = f"""SCHEMA:
+{st.session_state.schema_txt}
+
+CHAT HISTORY:
+{chat_hist if chat_hist else '(none)'}
+
+LAST_BA_JSON:
+{prior_json}
+
+LAST_RESULT_CSV:
+{prior_result_csv}
+
+NEW_INPUT:
+{user_text}
+"""
+    raw_mode = openai_chat(SYSTEM_DECIDER, decider_payload, model, api_key, require_json=True)
+    mode_obj = parse_ba_json(raw_mode)
+    if mode_obj is None:
+        # Fall back: if there is a previous assistant turn, treat as feedback when short; else new question
+        is_feedback = bool(last_assistant) and len(user_text) < 140
+        mode_obj = {
+            "mode": "feedback" if is_feedback else "new_question",
+            "normalized_question": user_text if not is_feedback else "",
+            "normalized_feedback": user_text if is_feedback else ""
+        }
+
+    # 2) Run BA or Reviser
+    if mode_obj.get("mode") == "feedback" and last_assistant is not None:
+        payload = f"""SCHEMA for `data`:
+{st.session_state.schema_txt}
+
+CHAT HISTORY:
+{chat_hist if chat_hist else '(none)'}
+
+PRIOR BA JSON:
+{prior_json}
+
+PRIOR RESULT (CSV sample):
+{prior_result_csv}
+
+USER FEEDBACK:
+{mode_obj.get('normalized_feedback','')}
+"""
+        raw = openai_chat(SYSTEM_BA_REVISE, payload, model, api_key, require_json=True)
+    else:
+        payload = f"""USER QUESTION:
+{mode_obj.get('normalized_question') or user_text}
+
+SCHEMA for `data`:
+{st.session_state.schema_txt}
+
+CHAT HISTORY (chronological):
+{chat_hist if chat_hist else '(none)'}
+"""
+        raw = openai_chat(SYSTEM_BA_FIN, payload, model, api_key, require_json=True)
+
+    ba = parse_ba_json(raw)
+    if ba is None:
+        st.error("BA did not return valid JSON.")
+        if debug_raw:
+            with st.expander("Raw model reply"):
+                st.write(raw)
+        return
+
+    sql = (ba.get("sql") or "").strip()
+    out_df = pd.DataFrame()
+    if sql:
+        try:
+            out_df = run_duckdb(st.session_state.df, sql)
+        except Exception as e:
+            st.warning(f"SQL execution failed: {e}")
+
+    # Append turns
+    st.session_state.messages.append({"role":"user","content": user_text})
+    turn = {
+        "role": "assistant",
+        "content": ba.get("narrative",""),
+        "narrative": ba.get("narrative",""),
+        "sql": sql if show_sql else "",
+        "result_snapshot": df_to_snapshot(out_df) if not out_df.empty else {},
+        "chart_suggestion": ba.get("chart_suggestion") or {},
+        "followups": ba.get("followups") or []
+    }
+    st.session_state.messages.append(turn)
+    st.session_state.last_ba_json = ba
+
+# ===================== RENDER CHAT LOG =====================
+for turn in st.session_state.messages:
+    if turn["role"] == "user":
+        with st.chat_message("user"):
+            st.markdown(turn["content"])
+    else:
+        render_assistant_turn(turn)
+
+# ===================== INPUT (single box) =====================
+user_msg = st.chat_input("Ask a financial question… or type feedback like 'group by month and show margin rate'.")
+if user_msg:
+    handle_user_input(user_msg)
