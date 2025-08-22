@@ -339,3 +339,66 @@ if st.button("Re-run BA & DS using my feedback to improve the answer", type="pri
             "feedback_note": st.session_state.last_feedback,
             "ba_json": st.session_state.last_ba_json,
             "ds_json": st.session_state.last_ds_json
+        }, indent=2)
+        # Use BA prompt but ask it to synthesize directive? No — use coordinator:
+        def reviewer_llm(user_payload: str) -> dict:
+            return llm_json(SYSTEM_REVIEW, user_payload)
+
+        rev = reviewer_llm(reviewer_payload)
+        directive = rev.get("revision_directive", "")
+        add_msg("assistant", "Coordinator: Revision directive", artifacts=rev)
+
+        # Re-run BA with directive
+        ba_user = (
+            f"USER QUESTION (original):\n{st.session_state.last_user_prompt}\n\n"
+            f"REVISION DIRECTIVE:\n{directive}\n\n"
+            f"SCHEMA for table `data`:\n{schema_txt}"
+        )
+        ba_json = llm_json(SYSTEM_BA, ba_user)
+        st.session_state.last_ba_json = ba_json
+        add_msg("assistant", "BA (revised): Financial framing & spec", artifacts=ba_json)
+
+        prep_sql = (ba_json.get("sql_feature_prep") or "").strip()
+        if prep_sql:
+            try:
+                feat_df = run_duckdb(df, prep_sql)
+                add_msg("assistant", "BA (revised): Feature prep result (preview)", artifacts={"rows": len(feat_df), "preview": feat_df.head(20).to_dict(orient="records")})
+            except Exception as e:
+                st.error(f"BA (revised) prep SQL failed: {e}")
+                with st.expander("Executed SQL (BA revised prep)"):
+                    st.code(prep_sql, language="sql")
+                add_msg("assistant", "BA (revised) prep SQL error; please adjust columns or ask BA to revise.", artifacts={"sql": prep_sql})
+
+        # Re-run DS with directive
+        ds_user = (
+            f"(REVISED) BA SPEC:\n{ba_json.get('ba_spec','')}\n\n"
+            f"REVISION DIRECTIVE:\n{directive}\n\n"
+            f"SCHEMA for `data`:\n{schema_txt}\n\n"
+            f"(Optional) BA feature-prep SQL:\n{prep_sql or '(none)'}"
+        )
+        ds_json = llm_json(SYSTEM_DS, ds_user)
+        st.session_state.last_ds_json = ds_json
+        add_msg("assistant", "DS (revised): Modeling plan", artifacts=ds_json)
+
+        ds_sql = (ds_json.get("sql_for_model") or "").strip()
+        if ds_sql:
+            try:
+                mdf = run_duckdb(df, ds_sql)
+                add_msg("assistant", "DS (revised): Feature/label table (preview)", artifacts={"rows": len(mdf), "preview": mdf.head(20).to_dict(orient="records")})
+            except Exception as e:
+                st.error(f"DS (revised) feature SQL failed: {e}")
+                with st.expander("Executed SQL (DS revised features)"):
+                    st.code(ds_sql, language="sql")
+                add_msg("assistant", "DS (revised) feature SQL error; please adjust columns or ask DS to revise.", artifacts={"sql": ds_sql})
+
+    except Exception as e:
+        add_msg("assistant", f"Error: {type(e).__name__}: {e}")
+        st.error(str(e))
+
+# =============================
+# Footer tips
+# =============================
+with st.expander("🛠️ Tips", expanded=False):
+    st.write("- BA focuses on financial framing. DS focuses on modeling (target, features, model, validation).")
+    st.write("- Each run re-reads your CSV to stay schema-accurate. The DuckDB table is always named `data`.")
+    st.write("- Use the feedback box to ask for changes (e.g., “use margin %, not revenue,” “predict churn next 30 days”).")
