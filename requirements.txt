@@ -1,0 +1,8 @@
+streamlit
+duckdb
+pandas
+numpy
+matplotlib
+scikit-learn
+openai
+tiktoken
