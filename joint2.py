@@ -5,104 +5,82 @@ import pandas as pd
 import duckdb
 import streamlit as st
 
-# =============================
-# Cloud-friendly config
-# =============================
+# ====== Cloud-friendly config ======
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 DEFAULT_MODEL  = st.secrets.get("OPENAI_MODEL",  os.getenv("OPENAI_MODEL",  "gpt-4o-mini"))
 
-# Optional OpenAI SDK (app degrades with clear error if missing)
 try:
     from openai import OpenAI
     _OPENAI_AVAILABLE = True
 except Exception:
     _OPENAI_AVAILABLE = False
 
-# =============================
-# Agent Prompts
-# =============================
-SYSTEM_BA_PLANNER = r'''
-You are “Business Analyst Agent (Planner).”
-Task: Read USER QUESTION and SCHEMA. Clarify the business intent and produce a concrete analytic SPEC for the DS to implement.
-Rules:
-- Use ONLY columns that exist; if a requested concept is absent (e.g., Region), propose the closest exact column(s) from the schema (e.g., State or Country) and state the substitution.
-- Define metric(s), group-bys, filters, and sort order when appropriate.
-Output ONE ```json block:
+# ====== Agent system prompts ======
+SYSTEM_BA = r"""
+You are the Business Analyst (BA) Agent focused on FINANCIAL PERFORMANCE.
+Your job:
+- Clarify business intent and frame the analysis in financial terms (revenue, margin, growth, retention, CAC/LTV, ARPU, etc.).
+- Propose a concrete analysis or KPI plan grounded in the actual CSV schema (no invented columns).
+- If a concept is missing (e.g., Region), suggest the closest available column(s).
+
+Output ONE ```json block with keys:
 {
-  "spec": "plain English spec the DS should implement",
-  "tl_dr": "1-2 sentence expected takeaway to aim for"
+  "reasoning_summary": "brief high-level reasoning (no secrets)",
+  "ba_spec": "plain-English plan: metrics, segments, time grain, filters, and any assumptions",
+  "sql_feature_prep": "optional DuckDB SQL to prep data for DS (or '' if not needed)"
 }
-'''
+"""
 
-SYSTEM_DS = r'''
-You are “Data Scientist Agent.”
-Task: Given a BA SPEC and the SCHEMA (single table `data`), return a SINGLE DuckDB SQL that answers the spec.
-Rules:
-- Only reference columns that exist; table name MUST be `data`.
-- Prefer precise, auditable metrics (counts, %, grouped stats). No causal claims.
-- If spec is impossible with the schema, set "sql" = "" and explain briefly in "narrative".
-Output ONE ```json block:
+SYSTEM_DS = r"""
+You are the Data Scientist (DS) Agent focused on MODELING.
+Your job:
+- Read the BA spec + CSV schema. Decide the modeling approach (classification/regression/time-series/cohorts).
+- Propose: target, candidate features, model family, validation plan, and measurable success criteria.
+- If useful, also return a SQL snippet to build features/labels from the CSV (DuckDB; table name `data` only).
+- Keep it executable and schema-safe. If something is impossible, say so and propose a nearest alternative.
+
+Output ONE ```json block with keys:
 {
-  "sql": "DuckDB SQL or empty string",
-  "narrative": "1-2 sentences describing the result",
-  "chart_suggestion": {"type": "bar|line|area|scatter|none", "x": "col or null", "y": "col or null"}
+  "reasoning_summary": "brief high-level reasoning (no secrets)",
+  "model_plan": "succinct steps: target, features, model choice, validation, metrics",
+  "sql_for_model": "DuckDB SQL to materialize features/labels; '' if not required",
+  "quick_tip": "1-liner practical suggestion the user can try next"
 }
-'''
+"""
 
-SYSTEM_BA_INTERPRET = r'''
-You are “Business Analyst Agent (Interpreter).”
-Task: Given RESULT TABLE (CSV sample) and DS narrative, write a concise, business-oriented interpretation with 3-6 bullets (findings, segments, risks).
-Do not speculate beyond the table; no causal claims.
-Output ONE ```json block:
+SYSTEM_REVIEW = r"""
+You are the Reviewer/Coordinator Agent.
+Task: Given the USER FEEDBACK and the prior BA+DS responses, produce a single revised instruction set that both agents should follow to reproduce a better answer.
+
+Return ONE ```json block with:
 {
-  "insight_bullets": ["...", "...", "..."]
+  "revision_directive": "single concise paragraph with concrete changes for BA and DS"
 }
-'''
+"""
 
-SYSTEM_BA_REVIEW = r'''
-You are “BA Reviewer.”
-Task: Briefly review the DS plan/SQL for business alignment with the BA SPEC.
-Return ONE line: either "approve" OR "revise: <1-sentence instruction>".
-'''
-
-# =============================
-# Streamlit page setup
-# =============================
-st.set_page_config(page_title="Dual-Agent Market Simulator (Baby-BGI)", layout="wide")
-st.title("🍼 Baby-BGI: Dual-Agent Market Simulator")
+# ====== Streamlit page ======
+st.set_page_config(page_title="BA↔DS Interactive Chat", layout="wide")
+st.title("💬 Two-Agent Interactive Chat — BA (Finance) & DS (Modeling)")
 
 with st.sidebar:
     st.header("⚙️ Setup")
     uploaded = st.file_uploader("Upload CSV", type=["csv"], accept_multiple_files=False)
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     api_key = st.text_input("OpenAI API Key", value=OPENAI_API_KEY, type="password")
-    feedback_loop = st.checkbox("Enable 1 feedback loop (BA critiques DS → DS revises)", value=True)
     show_schema = st.checkbox("Show inferred schema", value=True)
 
     st.markdown("---")
-    st.subheader("🎯 Simulation")
-    # Initialize sim state
-    if "sim" not in st.session_state:
-        st.session_state.sim = {
-            "difficulty": 1,
-            "round": 1,
-            "score": 0,
-            "history": [],  # list of turns with artifacts and feedback
-            "memory": {
-                "preferred_dims": set(),
-                "preferred_metrics": set(),
-                "bad_joins": set(),
-                "chart_prefs": {}
-            }
-        }
-    sim = st.session_state.sim
-    st.metric("Difficulty", sim["difficulty"])
-    st.metric("Round", sim["round"])
-    st.metric("Score", sim["score"])
+    st.subheader("🔁 Reproduction")
+    if "last_feedback" not in st.session_state:
+        st.session_state.last_feedback = ""
+    if "last_user_prompt" not in st.session_state:
+        st.session_state.last_user_prompt = ""
+    if "last_ba_json" not in st.session_state:
+        st.session_state.last_ba_json = {}
+    if "last_ds_json" not in st.session_state:
+        st.session_state.last_ds_json = {}
 
-# =============================
-# Helpers
-# =============================
+# ====== Helpers ======
 def ensure_openai():
     if not _OPENAI_AVAILABLE:
         raise RuntimeError("OpenAI SDK not installed. Add 'openai' to requirements.txt")
@@ -119,26 +97,26 @@ def infer_schema(df: pd.DataFrame, sample_rows: int = 5) -> str:
         lines.append(f"- {col} ({dtype})  samples: {sample_list}")
     return "\n".join(lines)
 
-def openai_chat(system_prompt: str, user_payload: str) -> str:
+def llm_json(system_prompt: str, user_payload: str) -> dict:
     client = ensure_openai()
     resp = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_payload},
+            {"role": "user", "content": user_payload + "\n\nReturn a single JSON object in a ```json fenced block."},
         ],
         temperature=0.1,
     )
-    return resp.choices[0].message.content
-
-def extract_json_block(text: str) -> str:
-    if not text:
-        return ""
+    txt = resp.choices[0].message.content or ""
     import re
-    m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-    return m.group(1).strip() if m else ""
+    m = re.search(r"```json\s*(\{.*?\})\s*```", txt, flags=re.DOTALL | re.IGNORECASE)
+    jtxt = m.group(1).strip() if m else "{}"
+    try:
+        return json.loads(jtxt)
+    except Exception:
+        return {"_raw": txt, "_parse_error": True}
 
-def run_duckdb(df: pd.DataFrame, sql: str) -> pd.DataFrame:
+def run_duckdb(df: pd.DataFrame, sql: str):
     con = duckdb.connect(database=":memory:")
     con.register("data", df)
     return con.execute(sql).df()
@@ -166,43 +144,19 @@ def render_chat():
                             except Exception:
                                 st.write(v)
 
-def reflect_memory_from_feedback(turn):
-    mem = st.session_state.sim["memory"]
-    fb = turn.get("feedback", {})
-    if fb.get("up"):
-        st.session_state.sim["score"] += 1
-    # Learn chart preference
-    ds = turn.get("artifacts", {}).get("DS JSON", {})
-    cs = (ds or {}).get("chart_suggestion") or {}
-    if isinstance(cs, dict) and cs.get("type"):
-        mem["chart_prefs"][cs["type"]] = mem["chart_prefs"].get(cs["type"], 0) + 1
-
-def evaluate_and_progress(df_out):
-    success = len(df_out) > 0
-    msg = "Great! Scenario cleared — next one unlocked." if success else "No luck yet — BA will propose a simpler segmentation next."
-    if success:
-        st.session_state.sim["difficulty"] += 1
-        st.session_state.sim["round"] += 1
-    else:
-        st.session_state.sim["round"] += 1
-    add_msg("system", msg)
-
-# =============================
-# Chat area (top) + input
-# =============================
+# ====== Chat area ======
 st.subheader("Chat")
 render_chat()
+user_prompt = st.chat_input("Ask a business question (BA will focus on finance; DS will propose modeling)…")
 
-prompt = st.chat_input("Ask a business question (or describe a decision you want to try)…")
-
-# =============================
-# Main loop: BA → DS → Execute → BA Interpret (+ optional feedback loop)
-# =============================
-if prompt:
-    add_msg("user", prompt)
+# ====== Main turn ======
+if user_prompt:
+    add_msg("user", user_prompt)
+    st.session_state.last_user_prompt = user_prompt
     try:
         if uploaded is None:
             raise RuntimeError("Please upload a CSV in the sidebar.")
+        # Re-read CSV each turn (schema freshness)
         df = pd.read_csv(uploaded)
         schema_txt = infer_schema(df)
 
@@ -210,82 +164,126 @@ if prompt:
             with st.expander("📜 Inferred Schema", expanded=False):
                 st.code(schema_txt, language="markdown")
 
-        # ---- BA Planner
-        status = st.status("🧭 BA Planner drafting a spec…", state="running")
-        planner_user = f"USER QUESTION:\n{prompt}\n\nSCHEMA for `data`:\n{schema_txt}"
-        raw_plan = openai_chat(SYSTEM_BA_PLANNER, planner_user)
-        j_plan = extract_json_block(raw_plan)
-        plan = json.loads(j_plan)
-        add_msg("assistant", "BA Plan", artifacts={"BA Plan JSON": plan})
-        status.update(label="🧪 DS generating SQL…", state="running")
+        # --- BA step ---
+        with st.status("🧭 BA framing financial analysis…", state="running"):
+            ba_user = f"USER QUESTION:\n{user_prompt}\n\nSCHEMA for table `data`:\n{schema_txt}"
+            ba_json = llm_json(SYSTEM_BA, ba_user)
+            st.session_state.last_ba_json = ba_json
+            add_msg("assistant", "BA: Financial framing & spec", artifacts=ba_json)
 
-        # ---- DS Agent
-        ds_user = f"SPEC from BA:\n{plan.get('spec','')}\n\nSCHEMA for `data`:\n{schema_txt}"
-        raw_ds = openai_chat(SYSTEM_DS, ds_user)
-        j_ds = extract_json_block(raw_ds)
-        ds = json.loads(j_ds)
-        sql = (ds.get("sql") or "").strip()
-        add_msg("assistant", ds.get("narrative", "DS result narrative."), artifacts={"DS JSON": ds, "SQL": sql})
+        # Optional SQL feature prep from BA
+        prep_sql = (ba_json.get("sql_feature_prep") or "").strip()
+        if prep_sql:
+            try:
+                feat_df = run_duckdb(df, prep_sql)
+                add_msg("assistant", "BA: Feature prep result (preview)", artifacts={"rows": len(feat_df), "preview": feat_df.head(20).to_dict(orient="records")})
+            except Exception as e:
+                add_msg("assistant", f"BA prep SQL failed: {e}", artifacts={"sql": prep_sql})
 
-        # ---- Feedback loop
-        if feedback_loop and sql:
-            review_payload = f"SPEC:\n{plan.get('spec','')}\n\nDS RESPONSE JSON:\n{j_ds}\n\nReturn 'approve' OR 'revise: <short instruction>'."
-            raw_review = openai_chat(SYSTEM_BA_REVIEW, review_payload)
-            add_msg("assistant", "BA Review", artifacts={"Review": raw_review})
-            if "revise:" in raw_review.lower():
-                status.update(label="🛠️ DS revising based on BA feedback…", state="running")
-                ds_user2 = f"{ds_user}\n\nBA FEEDBACK:\n{raw_review}\nReturn full JSON again."
-                raw_ds2 = openai_chat(SYSTEM_DS, ds_user2)
-                j_ds2 = extract_json_block(raw_ds2)
-                ds2 = json.loads(j_ds2)
-                sql = (ds2.get("sql") or sql).strip()
-                add_msg("assistant", "DS Revision Applied", artifacts={"DS Revised JSON": ds2, "SQL": sql})
+        # --- DS step ---
+        with st.status("🧪 DS proposing modeling plan…", state="running"):
+            ds_user = (
+                f"BA SPEC:\n{ba_json.get('ba_spec','')}\n\n"
+                f"SCHEMA for `data`:\n{schema_txt}\n\n"
+                f"(Optional) BA feature-prep SQL:\n{prep_sql or '(none)'}"
+            )
+            ds_json = llm_json(SYSTEM_DS, ds_user)
+            st.session_state.last_ds_json = ds_json
+            add_msg("assistant", "DS: Modeling plan", artifacts=ds_json)
 
-        # ---- Execute SQL
-        if not sql:
-            status.update(label="ℹ️ DS could not form safe SQL.", state="complete")
-            add_msg("assistant", "DS could not form a safe SQL with given schema.", artifacts={})
-        else:
-            status.update(label="🏃 Running SQL…", state="running")
-            out = run_duckdb(df, sql)
-            status.update(label="✅ Execution complete", state="complete")
-            add_msg("assistant", "Query Results", artifacts={"Rows": len(out), "Preview": out.head(20).to_dict(orient="records")})
+        # Optional DS SQL to materialize features/labels
+        ds_sql = (ds_json.get("sql_for_model") or "").strip()
+        if ds_sql:
+            try:
+                mdf = run_duckdb(df, ds_sql)
+                add_msg("assistant", "DS: Feature/label table (preview)", artifacts={"rows": len(mdf), "preview": mdf.head(20).to_dict(orient="records")})
+            except Exception as e:
+                add_msg("assistant", f"DS feature SQL failed: {e}", artifacts={"sql": ds_sql})
 
-            # ---- BA Interpreter
-            sample_csv = out.head(min(50, len(out))).to_csv(index=False)
-            interp_user = f"DS narrative: {ds.get('narrative','')}\n\nRESULT TABLE (CSV):\n{sample_csv}"
-            raw_interp = openai_chat(SYSTEM_BA_INTERPRET, interp_user)
-            j_interp = extract_json_block(raw_interp)
-            insights = json.loads(j_interp).get("insight_bullets", [])
-            add_msg("assistant", "BA Insights", artifacts={"insights": insights})
-
-            # ---- Feedback controls
-            st.markdown("#### Feedback on this turn")
+        # Feedback UI
+        with st.container():
+            st.markdown("#### Feedback controls")
             col1, col2 = st.columns([1,3])
             with col1:
                 up = st.button("👍 Helpful", key=f"up_{time.time()}")
                 down = st.button("👎 Not helpful", key=f"down_{time.time()}")
             with col2:
-                fb = st.text_input("Optional feedback (what to change next?)", key=f"fb_{time.time()}")
+                fb_note = st.text_input("Tell the agents what to change next:", key=f"fb_{time.time()}")
 
-            turn = {
-                "user": prompt,
-                "artifacts": {"BA Plan JSON": plan, "DS JSON": ds, "SQL": sql, "ResultRows": len(out), "Insights": insights},
-                "feedback": {"up": bool(up), "down": bool(down), "note": fb} if (up or down or fb) else {}
-            }
-            st.session_state.sim["history"].append(turn)
-            reflect_memory_from_feedback(turn)
-
-            # ---- Scenario progression
-            evaluate_and_progress(out)
-
-        status.update(label="✅ Round complete", state="complete")
+        if up or down or fb_note:
+            st.session_state.last_feedback = (fb_note or "").strip()
+            add_msg("user", f"Feedback — up={bool(up)}, down={bool(down)}, note={st.session_state.last_feedback or '(none)'}")
 
     except Exception as e:
         add_msg("assistant", f"Error: {type(e).__name__}: {e}")
         st.error(str(e))
 
-with st.expander("🛠️ Diagnostics & Tips", expanded=False):
-    st.write("- The app re-reads your CSV every question to keep schema awareness fresh.")
-    st.write("- If DS invents a column, use feedback to nudge.")
-    st.write("- On Streamlit Cloud, set OPENAI_API_KEY in the app’s Secrets.")
+# ====== Reproduce with feedback ======
+st.divider()
+st.subheader("🔁 Reproduce answer with your feedback")
+if st.button("Re-run BA & DS using my feedback to improve the answer", type="primary", use_container_width=True):
+    try:
+        if uploaded is None:
+            raise RuntimeError("Please upload a CSV in the sidebar.")
+        if not st.session_state.last_user_prompt:
+            raise RuntimeError("No previous user prompt to reproduce. Ask a question first.")
+        df = pd.read_csv(uploaded)
+        schema_txt = infer_schema(df)
+
+        # Build a revision directive from feedback + prior BA/DS outputs
+        reviewer_payload = json.dumps({
+            "user_prompt": st.session_state.last_user_prompt,
+            "feedback_note": st.session_state.last_feedback,
+            "ba_json": st.session_state.last_ba_json,
+            "ds_json": st.session_state.last_ds_json
+        }, indent=2)
+        rev = llm_json(SYSTEM_REVIEW, reviewer_payload)
+        directive = rev.get("revision_directive", "")
+        add_msg("assistant", "Coordinator: Revision directive", artifacts=rev)
+
+        # Re-run BA with directive
+        ba_user = (
+            f"USER QUESTION (original):\n{st.session_state.last_user_prompt}\n\n"
+            f"REVISION DIRECTIVE:\n{directive}\n\n"
+            f"SCHEMA for table `data`:\n{schema_txt}"
+        )
+        ba_json = llm_json(SYSTEM_BA, ba_user)
+        st.session_state.last_ba_json = ba_json
+        add_msg("assistant", "BA (revised): Financial framing & spec", artifacts=ba_json)
+
+        prep_sql = (ba_json.get("sql_feature_prep") or "").strip()
+        if prep_sql:
+            try:
+                feat_df = run_duckdb(df, prep_sql)
+                add_msg("assistant", "BA (revised): Feature prep result (preview)", artifacts={"rows": len(feat_df), "preview": feat_df.head(20).to_dict(orient="records")})
+            except Exception as e:
+                add_msg("assistant", f"BA (revised) prep SQL failed: {e}", artifacts={"sql": prep_sql})
+
+        # Re-run DS with directive
+        ds_user = (
+            f"(REVISED) BA SPEC:\n{ba_json.get('ba_spec','')}\n\n"
+            f"REVISION DIRECTIVE:\n{directive}\n\n"
+            f"SCHEMA for `data`:\n{schema_txt}\n\n"
+            f"(Optional) BA feature-prep SQL:\n{prep_sql or '(none)'}"
+        )
+        ds_json = llm_json(SYSTEM_DS, ds_user)
+        st.session_state.last_ds_json = ds_json
+        add_msg("assistant", "DS (revised): Modeling plan", artifacts=ds_json)
+
+        ds_sql = (ds_json.get("sql_for_model") or "").strip()
+        if ds_sql:
+            try:
+                mdf = run_duckdb(df, ds_sql)
+                add_msg("assistant", "DS (revised): Feature/label table (preview)", artifacts={"rows": len(mdf), "preview": mdf.head(20).to_dict(orient="records")})
+            except Exception as e:
+                add_msg("assistant", f"DS (revised) feature SQL failed: {e}", artifacts={"sql": ds_sql})
+
+    except Exception as e:
+        add_msg("assistant", f"Error: {type(e).__name__}: {e}")
+        st.error(str(e))
+
+# ====== Footer tips ======
+with st.expander("🛠️ Tips", expanded=False):
+    st.write("- BA focuses on financial framing. DS focuses on modeling (target, features, model, validation).")
+    st.write("- Each run **re-reads your CSV** to stay schema-accurate. Table is always named `data`.")
+    st.write("- Use the feedback box to ask for changes (e.g., “use margin %, not revenue,” “predict churn in next 1 month”).")
