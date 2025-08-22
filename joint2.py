@@ -5,7 +5,9 @@ import pandas as pd
 import duckdb
 import streamlit as st
 
-# ====== Cloud-friendly config ======
+# =============================
+# Cloud-friendly config
+# =============================
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 DEFAULT_MODEL  = st.secrets.get("OPENAI_MODEL",  os.getenv("OPENAI_MODEL",  "gpt-4o-mini"))
 
@@ -15,7 +17,9 @@ try:
 except Exception:
     _OPENAI_AVAILABLE = False
 
-# ====== Agent system prompts ======
+# =============================
+# Agent system prompts
+# =============================
 SYSTEM_BA = r"""
 You are the Business Analyst (BA) Agent focused on FINANCIAL PERFORMANCE.
 Your job:
@@ -58,7 +62,9 @@ Return ONE ```json block with:
 }
 """
 
-# ====== Streamlit page ======
+# =============================
+# Streamlit page
+# =============================
 st.set_page_config(page_title="BA↔DS Interactive Chat", layout="wide")
 st.title("💬 Two-Agent Interactive Chat — BA (Finance) & DS (Modeling)")
 
@@ -68,6 +74,38 @@ with st.sidebar:
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     api_key = st.text_input("OpenAI API Key", value=OPENAI_API_KEY, type="password")
     show_schema = st.checkbox("Show inferred schema", value=True)
+
+    st.markdown("---")
+    st.subheader("🧪 Utilities")
+
+    # LLM Health Check
+    if st.button("🔎 LLM health check"):
+        if not _OPENAI_AVAILABLE:
+            st.error("OpenAI SDK not installed. Add `openai` to requirements.txt.")
+        else:
+            try:
+                client = OpenAI(api_key=api_key)
+                ping = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role":"user","content":"Say OK in JSON."}],
+                    temperature=0.0,
+                )
+                st.success("OpenAI reachable.")
+                st.code(ping.choices[0].message.content, language="markdown")
+            except Exception as e:
+                st.error(f"OpenAI not reachable: {e}")
+
+    # Dry Run (no LLM) sanity check
+    if st.button("🔧 Dry run (no LLM)"):
+        if uploaded is None:
+            st.warning("Upload a CSV first.")
+        else:
+            try:
+                df_dry = pd.read_csv(uploaded)
+                st.success(f"UI OK — CSV read ({len(df_dry)} rows, {len(df_dry.columns)} cols). Showing head:")
+                st.write(df_dry.head(5))
+            except Exception as e:
+                st.error(f"CSV read failed: {e}")
 
     st.markdown("---")
     st.subheader("🔁 Reproduction")
@@ -80,7 +118,9 @@ with st.sidebar:
     if "last_ds_json" not in st.session_state:
         st.session_state.last_ds_json = {}
 
-# ====== Helpers ======
+# =============================
+# Helpers
+# =============================
 def ensure_openai():
     if not _OPENAI_AVAILABLE:
         raise RuntimeError("OpenAI SDK not installed. Add 'openai' to requirements.txt")
@@ -98,22 +138,37 @@ def infer_schema(df: pd.DataFrame, sample_rows: int = 5) -> str:
     return "\n".join(lines)
 
 def llm_json(system_prompt: str, user_payload: str) -> dict:
+    """LLM call that returns parsed JSON, or shows raw response if JSON extraction fails."""
     client = ensure_openai()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_payload + "\n\nReturn a single JSON object in a ```json fenced block."},
-        ],
-        temperature=0.1,
-    )
-    txt = resp.choices[0].message.content or ""
-    import re
-    m = re.search(r"```json\s*(\{.*?\})\s*```", txt, flags=re.DOTALL | re.IGNORECASE)
-    jtxt = m.group(1).strip() if m else "{}"
     try:
-        return json.loads(jtxt)
-    except Exception:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_payload + "\n\nReturn a single JSON object in a ```json fenced block."},
+            ],
+            temperature=0.1,
+        )
+        txt = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        st.error(f"OpenAI call failed: {type(e).__name__}: {e}")
+        return {"_error": str(e)}
+
+    import re, json as _json
+    m = re.search(r"```json\s*(\{.*?\})\s*```", txt, flags=re.DOTALL | re.IGNORECASE)
+    if not m:
+        st.warning("Model did not return JSON. Showing raw text below.")
+        with st.expander("Raw model response", expanded=False):
+            st.code(txt, language="markdown")
+        return {"_raw": txt, "_parse_error": True}
+
+    jtxt = m.group(1).strip()
+    try:
+        return _json.loads(jtxt)
+    except Exception as e:
+        st.error(f"JSON parsing failed: {e}")
+        with st.expander("Raw JSON text (first 400 chars)"):
+            st.code(jtxt[:400], language="json")
         return {"_raw": txt, "_parse_error": True}
 
 def run_duckdb(df: pd.DataFrame, sql: str):
@@ -144,25 +199,34 @@ def render_chat():
                             except Exception:
                                 st.write(v)
 
-# ====== Chat area ======
+# =============================
+# Chat area
+# =============================
 st.subheader("Chat")
 render_chat()
 user_prompt = st.chat_input("Ask a business question (BA will focus on finance; DS will propose modeling)…")
 
-# ====== Main turn ======
+# =============================
+# Main turn: BA -> DS + optional SQLs
+# =============================
 if user_prompt:
     add_msg("user", user_prompt)
     st.session_state.last_user_prompt = user_prompt
     try:
+        # CSV/schema gating
         if uploaded is None:
-            raise RuntimeError("Please upload a CSV in the sidebar.")
-        # Re-read CSV each turn (schema freshness)
-        df = pd.read_csv(uploaded)
-        schema_txt = infer_schema(df)
+            st.warning("Please upload a CSV first.")
+            st.stop()
 
+        df = pd.read_csv(uploaded)
+        if df.empty:
+            st.warning("Uploaded CSV has 0 rows.")
+            st.stop()
+
+        schema_txt = infer_schema(df)
         if show_schema:
-            with st.expander("📜 Inferred Schema", expanded=False):
-                st.code(schema_txt, language="markdown")
+            with st.expander("📜 Inferred Schema", expanded=True):
+                st.code(schema_txt or "(no columns detected)", language="markdown")
 
         # --- BA step ---
         with st.status("🧭 BA framing financial analysis…", state="running"):
@@ -178,7 +242,10 @@ if user_prompt:
                 feat_df = run_duckdb(df, prep_sql)
                 add_msg("assistant", "BA: Feature prep result (preview)", artifacts={"rows": len(feat_df), "preview": feat_df.head(20).to_dict(orient="records")})
             except Exception as e:
-                add_msg("assistant", f"BA prep SQL failed: {e}", artifacts={"sql": prep_sql})
+                st.error(f"BA prep SQL failed: {e}")
+                with st.expander("Executed SQL (BA prep)"):
+                    st.code(prep_sql, language="sql")
+                add_msg("assistant", "BA prep SQL error; please adjust columns or ask BA to revise.", artifacts={"sql": prep_sql})
 
         # --- DS step ---
         with st.status("🧪 DS proposing modeling plan…", state="running"):
@@ -198,7 +265,10 @@ if user_prompt:
                 mdf = run_duckdb(df, ds_sql)
                 add_msg("assistant", "DS: Feature/label table (preview)", artifacts={"rows": len(mdf), "preview": mdf.head(20).to_dict(orient="records")})
             except Exception as e:
-                add_msg("assistant", f"DS feature SQL failed: {e}", artifacts={"sql": ds_sql})
+                st.error(f"DS feature SQL failed: {e}")
+                with st.expander("Executed SQL (DS features)"):
+                    st.code(ds_sql, language="sql")
+                add_msg("assistant", "DS feature SQL error; please adjust columns or ask DS to revise.", artifacts={"sql": ds_sql})
 
         # Feedback UI
         with st.container():
@@ -218,19 +288,28 @@ if user_prompt:
         add_msg("assistant", f"Error: {type(e).__name__}: {e}")
         st.error(str(e))
 
-# ====== Reproduce with feedback ======
+# =============================
+# Reproduce with feedback (BA & DS)
+# =============================
 st.divider()
 st.subheader("🔁 Reproduce answer with your feedback")
 if st.button("Re-run BA & DS using my feedback to improve the answer", type="primary", use_container_width=True):
     try:
         if uploaded is None:
-            raise RuntimeError("Please upload a CSV in the sidebar.")
+            st.warning("Please upload a CSV first.")
+            st.stop()
+
         if not st.session_state.last_user_prompt:
-            raise RuntimeError("No previous user prompt to reproduce. Ask a question first.")
+            st.warning("No previous user prompt to reproduce. Ask a question first.")
+            st.stop()
+
         df = pd.read_csv(uploaded)
+        if df.empty:
+            st.warning("Uploaded CSV has 0 rows.")
+            st.stop()
+
         schema_txt = infer_schema(df)
 
-        # Build a revision directive from feedback + prior BA/DS outputs
         reviewer_payload = json.dumps({
             "user_prompt": st.session_state.last_user_prompt,
             "feedback_note": st.session_state.last_feedback,
@@ -257,7 +336,10 @@ if st.button("Re-run BA & DS using my feedback to improve the answer", type="pri
                 feat_df = run_duckdb(df, prep_sql)
                 add_msg("assistant", "BA (revised): Feature prep result (preview)", artifacts={"rows": len(feat_df), "preview": feat_df.head(20).to_dict(orient="records")})
             except Exception as e:
-                add_msg("assistant", f"BA (revised) prep SQL failed: {e}", artifacts={"sql": prep_sql})
+                st.error(f"BA (revised) prep SQL failed: {e}")
+                with st.expander("Executed SQL (BA revised prep)"):
+                    st.code(prep_sql, language="sql")
+                add_msg("assistant", "BA (revised) prep SQL error; please adjust columns or ask BA to revise.", artifacts={"sql": prep_sql})
 
         # Re-run DS with directive
         ds_user = (
@@ -276,14 +358,19 @@ if st.button("Re-run BA & DS using my feedback to improve the answer", type="pri
                 mdf = run_duckdb(df, ds_sql)
                 add_msg("assistant", "DS (revised): Feature/label table (preview)", artifacts={"rows": len(mdf), "preview": mdf.head(20).to_dict(orient="records")})
             except Exception as e:
-                add_msg("assistant", f"DS (revised) feature SQL failed: {e}", artifacts={"sql": ds_sql})
+                st.error(f"DS (revised) feature SQL failed: {e}")
+                with st.expander("Executed SQL (DS revised features)"):
+                    st.code(ds_sql, language="sql")
+                add_msg("assistant", "DS (revised) feature SQL error; please adjust columns or ask DS to revise.", artifacts={"sql": ds_sql})
 
     except Exception as e:
         add_msg("assistant", f"Error: {type(e).__name__}: {e}")
         st.error(str(e))
 
-# ====== Footer tips ======
+# =============================
+# Footer tips
+# =============================
 with st.expander("🛠️ Tips", expanded=False):
     st.write("- BA focuses on financial framing. DS focuses on modeling (target, features, model, validation).")
-    st.write("- Each run **re-reads your CSV** to stay schema-accurate. Table is always named `data`.")
-    st.write("- Use the feedback box to ask for changes (e.g., “use margin %, not revenue,” “predict churn in next 1 month”).")
+    st.write("- Each run re-reads your CSV to stay schema-accurate. The DuckDB table is always named `data`.")
+    st.write("- Use the feedback box to ask for changes (e.g., “use margin %, not revenue,” “predict churn next 30 days”).")
