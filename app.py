@@ -3,7 +3,7 @@ import io
 import json
 import time
 import zipfile
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 
 import numpy as np
 import pandas as pd
@@ -35,7 +35,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 # =============================
 SYSTEM_AM = r"""
 You are the **Analytics Manager (AM)** working with a CEO (non-technical) and a Data Scientist (DS).
-Your responsibilities:
+Responsibilities:
 - Face the CEO: restate their request in business terms aiming at PROFIT improvement (revenue ↑, cost ↓, margin ↑).
 - If the CEO message is ambiguous or missing info, ASK 1–3 clarifying questions (set need_more_info=true).
 - Design an analytics plan for DS using ONLY available tables/columns.
@@ -136,7 +136,6 @@ if "chat" not in st.session_state: st.session_state.chat = []
 if "last_am_json" not in st.session_state: st.session_state.last_am_json = {}
 if "last_ds_json" not in st.session_state: st.session_state.last_ds_json = {}
 if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
-if "last_turn_bundle" not in st.session_state: st.session_state.last_turn_bundle = {}  # pack AM/DS artifacts
 
 # =============================
 # Helpers
@@ -223,7 +222,7 @@ def summarize_tables(tables: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
             "rows": int(len(df)),
             "cols": int(len(df.columns)),
             "missing_fraction": miss,
-            "sample": df.head(5).to_dict(orient="records"),
+            "sample": df.head(5).to_dict(orient="records"),  # first 5 rows
             "schema": "\n".join([f"- {c} ({str(df[c].dtype)})" for c in df.columns])
         }
     return out
@@ -246,6 +245,22 @@ def render_chat():
                         else:
                             st.write(v)
 
+# --- Processing helpers (progress & chat markers) ---
+def processing_start(title="Agents are working..."):
+    add_msg("system", f"⏳ {title}")
+    st_placeholder.empty(); render_chat()
+    return st.status(title, state="running")
+
+def processing_update(status_obj, label):
+    status_obj.update(label=label, state="running")
+    add_msg("system", f"⏳ {label}")
+    st_placeholder.empty(); render_chat()
+
+def processing_done(status_obj, label="Done"):
+    status_obj.update(label=f"✅ {label}", state="complete")
+    add_msg("system", f"✅ {label}")
+    st_placeholder.empty(); render_chat()
+
 # =============================
 # Load data (and DS first overview)
 # =============================
@@ -263,6 +278,7 @@ if zip_file is not None and st.session_state.tables is None:
 # Chat UI
 # =============================
 st.subheader("Chat")
+st_placeholder = st.empty()
 render_chat()
 
 # consume preset prompt
@@ -368,6 +384,7 @@ def run_am_plan(ceo_prompt: str) -> dict:
     am_json = llm_json(SYSTEM_AM, json.dumps(payload))
     st.session_state.last_am_json = am_json
     add_msg("am", am_json.get("am_brief",""), artifacts=am_json)
+    st_placeholder.empty(); render_chat()
     return am_json
 
 def run_ds_step(am_json: dict) -> dict:
@@ -379,28 +396,37 @@ def run_ds_step(am_json: dict) -> dict:
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
     st.session_state.last_ds_json = ds_json
     add_msg("ds", ds_json.get("ds_summary",""), artifacts=ds_json)
+    st_placeholder.empty(); render_chat()
     return ds_json
 
 def execute_ds_action(ds_json: dict):
     action = (ds_json.get("action") or "").lower()
+
     if action == "overview":
         with st.expander("📊 Table Previews", expanded=True):
             for name, df in st.session_state.tables.items():
-                st.markdown(f"**{name}** (first 10 rows)")
-                st.dataframe(df.head(10), use_container_width=True)
+                st.markdown(f"**{name}** (first 5 rows)")
+                st.dataframe(df.head(5), use_container_width=True)
         add_msg("ds", "Provided previews for each table.")
+        st_placeholder.empty(); render_chat()
+
     elif action == "sql":
         sql = (ds_json.get("duckdb_sql") or "").strip()
-        if not sql: add_msg("ds","No SQL provided."); return
+        if not sql:
+            add_msg("ds","No SQL provided."); st_placeholder.empty(); render_chat(); return
         try:
             out = run_duckdb_sql(st.session_state.tables, sql)
             add_msg("ds", "SQL results ready.", artifacts={"sql": sql, "preview": out.head(25).to_dict(orient="records")})
+            st_placeholder.empty(); render_chat()
             with st.expander("SQL Results", expanded=True):
                 st.code(sql, language="sql"); st.dataframe(out, use_container_width=True)
         except Exception as e:
-            st.error(f"SQL failed: {e}"); add_msg("ds", f"SQL error: {e}", artifacts={"sql": sql})
+            st.error(f"SQL failed: {e}"); add_msg("ds", f"SQL error: {e}", artifacts={"sql": sql}); st_placeholder.empty(); render_chat()
+
     elif action == "calc":
         add_msg("ds", f"Calculation: {ds_json.get('calc_description','(no description)')}")
+        st_placeholder.empty(); render_chat()
+
     elif action in ("feature_engineering","modeling"):
         base = None
         sql = (ds_json.get("duckdb_sql") or "").strip()
@@ -410,6 +436,7 @@ def execute_ds_action(ds_json: dict):
             except Exception as e:
                 st.error(f"Feature SQL failed: {e}")
                 add_msg("ds", f"Feature SQL error: {e}", artifacts={"sql": sql})
+                st_placeholder.empty(); render_chat()
         if base is None:
             # pick first table that has target, else first table
             plan = ds_json.get("model_plan") or {}
@@ -421,6 +448,7 @@ def execute_ds_action(ds_json: dict):
 
         if action == "feature_engineering":
             add_msg("ds", "Feature engineering base ready.", artifacts={"rows": len(base), "preview": base.head(20).to_dict(orient="records")})
+            st_placeholder.empty(); render_chat()
             with st.expander("Feature Base Preview", expanded=True):
                 st.dataframe(base.head(20), use_container_width=True)
         else:
@@ -431,19 +459,22 @@ def execute_ds_action(ds_json: dict):
             family = (plan.get("model_family") or "logistic_regression").lower()
             report = train_model(base, task, target, feats, family)
             add_msg("ds", "Model trained.", artifacts={"model_report": report})
+            st_placeholder.empty(); render_chat()
             with st.expander("Model Report", expanded=True): st.json(report)
+
     else:
         add_msg("ds", f"Action '{action}' not recognized.", artifacts=ds_json)
+        st_placeholder.empty(); render_chat()
 
 def classify_intent(history: List[dict], latest_user: str) -> str:
     # Build compact history for the classifier
     h = [{"role": m["role"], "content": m["content"][:1000]} for m in history[-10:]]
     payload = {"history": h, "latest_user": latest_user}
     out = llm_json(SYSTEM_INTENT, json.dumps(payload))
-    intent = (out or {}).get("intent","new_request")
-    return intent
+    return (out or {}).get("intent","new_request")
 
 def revise_with_feedback(feedback_text: str):
+    s = processing_start("Revising based on CEO feedback…")
     bundle = {
         "ceo_prompt": st.session_state.last_user_prompt,
         "feedback_note": feedback_text,
@@ -453,46 +484,57 @@ def revise_with_feedback(feedback_text: str):
     rev = llm_json(SYSTEM_REVIEW, json.dumps(bundle))
     directive = rev.get("revision_directive","")
     add_msg("system", "Coordinator directive produced.", artifacts=rev)
-    # Rerun AM/DS with directive appended
+    st_placeholder.empty(); render_chat()
+
     revised_prompt = f"{st.session_state.last_user_prompt}\n\n(Director to AM/DS:) {directive}"
+    processing_update(s, "AM planning with directive…")
     am_json = run_am_plan(revised_prompt)
     if am_json.get("need_more_info"):
         qs = am_json.get("clarifying_questions", [])
-        if qs: add_msg("am", "Before proceeding, could you clarify:", artifacts={"questions": qs})
-        return
+        if qs:
+            add_msg("am", "Before proceeding, could you clarify:", artifacts={"questions": qs})
+            processing_done(s, "Waiting for CEO clarification")
+            return
+    processing_update(s, "DS executing revised plan…")
     ds_json = run_ds_step(am_json)
     execute_ds_action(ds_json)
+    processing_done(s, "Revision complete")
 
-# =============================
-# Turn execution
-# =============================
 def run_turn_ceo(text: str):
     st.session_state.last_user_prompt = text
-    # If tables not loaded
     if st.session_state.tables is None:
         add_msg("system", "Please upload a ZIP of CSVs first.")
+        st_placeholder.empty(); render_chat()
         return
-    # AM plan
+
+    s = processing_start("AM is designing an analytics plan…")
     am_json = run_am_plan(text)
+    processing_update(s, "AM plan ready → DS executing…")
+
     if am_json.get("need_more_info"):
         qs = am_json.get("clarifying_questions", [])
-        if qs: add_msg("am", "Before proceeding, could you clarify:", artifacts={"questions": qs})
+        if qs:
+            add_msg("am", "Before proceeding, could you clarify:", artifacts={"questions": qs})
+            processing_done(s, "Waiting for CEO clarification")
+            return
+        processing_done(s, "Need more information")
         return
-    # DS step
+
     ds_json = run_ds_step(am_json)
+    processing_update(s, "DS decided action; executing…")
     execute_ds_action(ds_json)
+    processing_done(s, "Turn complete")
 
 # =============================
 # Handle CEO message
 # =============================
 if user_prompt:
     add_msg("user", user_prompt)
-    # Detect intent: feedback vs new request vs answers_to_clarifying
+    st_placeholder.empty(); render_chat()
     intent = classify_intent(st.session_state.chat, user_prompt)
     if intent == "feedback":
         revise_with_feedback(user_prompt)
     elif intent == "answers_to_clarifying":
-        # Treat as appended context → rerun AM with original + answers
         combined = f"{st.session_state.last_user_prompt}\n\n(CEO clarification:) {user_prompt}"
         run_turn_ceo(combined)
     else:
