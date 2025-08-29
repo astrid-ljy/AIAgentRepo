@@ -1,9 +1,11 @@
+# app2.py
+
 import os
 import io
 import re
 import json
 import zipfile
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -50,6 +52,11 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 
 SYSTEM_DS = """
 You are the Data Scientist (DS). Execute the AM plan using only available columns.
+
+IMPORTANT: The field "action" MUST be exactly one of:
+["overview","sql","eda","calc","feature_engineering","modeling"]
+Do not invent new labels or variants.
+
 Return JSON fields:
 - ds_summary: brief note of intended execution
 - action: overview|sql|eda|calc|feature_engineering|modeling
@@ -66,6 +73,11 @@ You are the Data Scientist (DS). Revise your prior plan/output based on AM criti
 - Keep to ONLY existing tables/columns.
 - Fix suitability issues AM mentioned.
 - Keep it concise and executable.
+
+IMPORTANT: The field "action" MUST be exactly one of:
+["overview","sql","eda","calc","feature_engineering","modeling"]
+Do not invent new labels or variants.
+
 Return JSON with the SAME schema you use normally:
 { "ds_summary": "...", "action": "...", "duckdb_sql": "... or [...]", "charts": [...], "model_plan": {...}, "calc_description": "...", "assumptions": "..." }
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
@@ -134,64 +146,50 @@ def ensure_openai():
         raise RuntimeError("Missing OPENAI_API_KEY")
     return OpenAI(api_key=api_key)
 
-
 def to_jsonable(obj):
     """Recursively convert arbitrary objects into JSON-safe primitives."""
-    # primitives
     if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj
-    # pandas
     if isinstance(obj, pd.DataFrame):
         return {"__dataframe_head__": obj.head(10).to_dict(orient="records")}
     if isinstance(obj, pd.Series):
         return obj.tolist()
-    # containers
     if isinstance(obj, dict):
         return {str(k): to_jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
         return [to_jsonable(v) for v in obj]
-    # callables or other objects
     if callable(obj):
         name = getattr(obj, "__name__", "callable")
         return f"<<callable:{name}>>"
-    # fallback
     return str(obj)
-
 
 def llm_json(system_prompt: str, user_payload: Any) -> dict:
     """
-    Robust JSON helper:
-    - Sanitizes payload to JSON-safe primitives.
-    - Ensures 'json' appears in messages (OpenAI requirement when using response_format json_object).
-    - Tries structured mode first; on failure, retries without response_format and parses fenced/raw JSON.
+    JSON-safe, robust wrapper:
+    - Sanitizes payload.
+    - Uses response_format=json_object when possible.
+    - Falls back and extracts fenced/raw JSON.
     """
     client = ensure_openai()
-
     safe_payload = json.dumps(to_jsonable(user_payload))
     sys_msg = system_prompt.strip() + "\n\nReturn ONLY a single JSON object. This line contains the word json."
     user_msg = safe_payload + "\n\nPlease respond with JSON only (a single object)."
 
-    # Preferred structured call
     try:
         resp = client.chat.completions.create(
             model=model,
             response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": user_msg},
-            ],
+            messages=[{"role": "system", "content": sys_msg},
+                      {"role": "user", "content": user_msg}],
             temperature=0.0,
         )
         return json.loads(resp.choices[0].message.content or "{}")
     except Exception as e1:
-        # Fallback: free-form then parse
         try:
             resp = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": sys_msg},
-                    {"role": "user", "content": user_msg + "\n\nIf needed, wrap JSON in ```json fences."},
-                ],
+                messages=[{"role": "system", "content": sys_msg},
+                          {"role": "user", "content": user_msg + "\n\nIf needed, wrap JSON in ```json fences."}],
                 temperature=0.0,
             )
             raw = resp.choices[0].message.content or ""
@@ -208,7 +206,6 @@ def llm_json(system_prompt: str, user_payload: Any) -> dict:
             except Exception: pass
         return {"_raw": raw, "_parse_error": True}
 
-
 def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
     tables = {}
     with zipfile.ZipFile(file) as z:
@@ -223,17 +220,14 @@ def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
             tables[key] = df
     return tables
 
-
 def run_duckdb_sql(tables: Dict[str, pd.DataFrame], sql: str) -> pd.DataFrame:
     con = duckdb.connect(database=":memory:")
     for name, df in tables.items():
         con.register(name, df)
     return con.execute(sql).df()
 
-
 def add_msg(role, content, artifacts=None):
     st.session_state.chat.append({"role": role, "content": content, "artifacts": artifacts or {}})
-
 
 def render_chat(incremental: bool = True):
     msgs = st.session_state.chat
@@ -246,9 +240,7 @@ def render_chat(incremental: bool = True):
                     st.json(m["artifacts"])
     st.session_state.last_rendered_idx = len(msgs)
 
-
 def _sql_first(maybe_sql):
-    """Return first non-empty SQL if input is str or list of str; else ''."""
     if isinstance(maybe_sql, str):
         return maybe_sql.strip()
     if isinstance(maybe_sql, list):
@@ -257,9 +249,7 @@ def _sql_first(maybe_sql):
                 return s.strip()
     return ""
 
-
 def is_data_inventory_question(text: str) -> bool:
-    """Heuristic: force 'overview' for data-inventory prompts."""
     q = (text or "").lower()
     triggers = [
         "what data do we have", "what data do i have", "what data do we have here",
@@ -267,6 +257,33 @@ def is_data_inventory_question(text: str) -> bool:
         "preview tables", "show tables", "data inventory"
     ]
     return any(t in q for t in triggers)
+
+# --- Action normalization ---
+ALLOWED_ACTIONS = {
+    "overview", "sql", "eda", "calc", "feature_engineering", "modeling"
+}
+def normalize_action(a: str) -> str:
+    s = (a or "").lower().strip()
+    synonyms = {
+        "overview with data quality checks": "overview",
+        "overview - data quality": "overview",
+        "data quality overview": "overview",
+        "quality_overview": "overview",
+        "exploratory data analysis": "eda",
+        "exploratory-data-analysis": "eda",
+        "eda overview": "eda",
+        "fe": "feature_engineering",
+        "feature engineering": "feature_engineering",
+        "classification": "modeling",
+        "regression": "modeling",
+    }
+    for k, v in synonyms.items():
+        if s == k or k in s:
+            return v
+    for a0 in ALLOWED_ACTIONS:
+        if s.startswith(a0):
+            return a0
+    return s
 
 
 # ======================
@@ -347,11 +364,11 @@ def run_am_plan(prompt: str) -> dict:
     render_chat()
     return am_json
 
-
 def run_ds_step(am_json: dict) -> dict:
     ds_payload = {"am_plan": am_json.get("plan_for_ds", ""),
                   "tables": {k: list(v.columns) for k, v in (st.session_state.tables or {}).items()}}
     ds_json = llm_json(SYSTEM_DS, ds_payload)
+    ds_json["action"] = normalize_action(ds_json.get("action"))  # normalize here
     st.session_state.last_ds_json = ds_json
     add_msg("ds", ds_json.get("ds_summary", ""),
             artifacts={"action": ds_json.get("action"),
@@ -359,14 +376,12 @@ def run_ds_step(am_json: dict) -> dict:
     render_chat()
     return ds_json
 
-
 def am_review(ceo_prompt: str, ds_json: dict, meta: dict) -> dict:
     bundle = {"ceo_question": ceo_prompt,
               "am_plan": st.session_state.last_am_json,
               "ds_json": ds_json,
               "meta": meta}
     return llm_json(SYSTEM_AM_REVIEW, bundle)
-
 
 def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict) -> dict:
     payload = {
@@ -379,7 +394,9 @@ def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict) -> dict:
             "improvements": review_json.get("improvements"),
         }
     }
-    return llm_json(SYSTEM_DS_REVISE, payload)
+    ds_json = llm_json(SYSTEM_DS_REVISE, payload)
+    ds_json["action"] = normalize_action(ds_json.get("action"))  # normalize revised action
+    return ds_json
 
 
 # ======================
@@ -455,7 +472,6 @@ def build_meta(ds_json: dict) -> dict:
 def render_final(ds_json: dict):
     action = (ds_json.get("action") or "").lower()
 
-    # ---- OVERVIEW ----
     if action == "overview":
         st.markdown("### 📊 Table Previews (first 5 rows)")
         for name, df in st.session_state.tables.items():
@@ -463,7 +479,6 @@ def render_final(ds_json: dict):
             st.dataframe(df.head(5), width="stretch")
         add_msg("ds", "Overview rendered."); render_chat(); return
 
-    # ---- EDA ----
     if action == "eda":
         raw_sql = ds_json.get("duckdb_sql")
         sql_list = raw_sql if isinstance(raw_sql, list) else [raw_sql]
@@ -495,7 +510,6 @@ def render_final(ds_json: dict):
                 st.error(f"EDA SQL failed: {e}")
         add_msg("ds","EDA rendered."); render_chat(); return
 
-    # ---- SQL ----
     if action == "sql":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         if not sql:
@@ -510,13 +524,11 @@ def render_final(ds_json: dict):
             st.error(f"SQL failed: {e}")
         return
 
-    # ---- CALC ----
     if action == "calc":
         st.markdown("### 🧮 Calculation")
         st.write(ds_json.get("calc_description","(no description)"))
         add_msg("ds","Calculation displayed."); render_chat(); return
 
-    # ---- FEATURE ENGINEERING ----
     if action == "feature_engineering":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         base = run_duckdb_sql(st.session_state.tables, sql) if sql else next(iter(st.session_state.tables.values())).copy()
@@ -524,7 +536,6 @@ def render_final(ds_json: dict):
         st.dataframe(base.head(20), width="stretch")
         add_msg("ds","Feature base ready."); render_chat(); return
 
-    # ---- MODELING ----
     if action == "modeling":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         plan = ds_json.get("model_plan") or {}
