@@ -213,8 +213,7 @@ def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
     return tables
 
 def duckdb_connect_with_tables(tables: Dict[str, pd.DataFrame]):
-    con = duckdb.connect(database=":memory__":
-    )
+    con = duckdb.connect(database=":memory:")
     for name, df in tables.items():
         con.register(name, df)
     return con
@@ -602,3 +601,4 @@ if show_schema and st.session_state.tables:
         for tname, df in st.session_state.tables.items():
             st.markdown(f"**{tname}** — rows: {len(df)}, cols: {len(df.columns)}")
             st.code("\n".join([f"- {c} ({str(df[c].dtype)})" for c in df.columns]), language="markdown")
+
