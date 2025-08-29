@@ -403,11 +403,12 @@ def execute_ds_action(ds_json: dict):
     action = (ds_json.get("action") or "").lower()
 
     if action == "overview":
-        with st.expander("📊 Table Previews", expanded=True):
-            for name, df in st.session_state.tables.items():
-                st.markdown(f"**{name}** (first 5 rows)")
-                st.dataframe(df.head(5), use_container_width=True)
-        add_msg("ds", "Provided previews for each table.")
+        # Show 5 rows for each table directly (inline)
+        st.markdown("### 📊 Table Previews")
+        for name, df in st.session_state.tables.items():
+            st.markdown(f"**{name}** — first 5 rows")
+            st.dataframe(df.head(5), use_container_width=True)
+        add_msg("ds", "Provided previews for each table (first 5 rows).")
         st_placeholder.empty(); render_chat()
 
     elif action == "sql":
@@ -416,12 +417,15 @@ def execute_ds_action(ds_json: dict):
             add_msg("ds","No SQL provided."); st_placeholder.empty(); render_chat(); return
         try:
             out = run_duckdb_sql(st.session_state.tables, sql)
-            add_msg("ds", "SQL results ready.", artifacts={"sql": sql, "preview": out.head(25).to_dict(orient="records")})
+            add_msg("ds", "SQL results ready.", artifacts={"sql": sql})
             st_placeholder.empty(); render_chat()
-            with st.expander("SQL Results", expanded=True):
-                st.code(sql, language="sql"); st.dataframe(out, use_container_width=True)
+            st.markdown("### 🧮 SQL Results (first 25 rows)")
+            st.code(sql, language="sql")
+            st.dataframe(out.head(25), use_container_width=True)
         except Exception as e:
-            st.error(f"SQL failed: {e}"); add_msg("ds", f"SQL error: {e}", artifacts={"sql": sql}); st_placeholder.empty(); render_chat()
+            st.error(f"SQL failed: {e}")
+            add_msg("ds", f"SQL error: {e}", artifacts={"sql": sql})
+            st_placeholder.empty(); render_chat()
 
     elif action == "calc":
         add_msg("ds", f"Calculation: {ds_json.get('calc_description','(no description)')}")
@@ -447,10 +451,10 @@ def execute_ds_action(ds_json: dict):
             if base is None: base = next(iter(st.session_state.tables.values())).copy()
 
         if action == "feature_engineering":
-            add_msg("ds", "Feature engineering base ready.", artifacts={"rows": len(base), "preview": base.head(20).to_dict(orient="records")})
+            add_msg("ds", "Feature engineering base ready.")
             st_placeholder.empty(); render_chat()
-            with st.expander("Feature Base Preview", expanded=True):
-                st.dataframe(base.head(20), use_container_width=True)
+            st.markdown("### 🧱 Feature Engineering Base (first 20 rows)")
+            st.dataframe(base.head(20), use_container_width=True)
         else:
             plan = ds_json.get("model_plan") or {}
             task   = (plan.get("task") or "classification").lower()
@@ -460,7 +464,8 @@ def execute_ds_action(ds_json: dict):
             report = train_model(base, task, target, feats, family)
             add_msg("ds", "Model trained.", artifacts={"model_report": report})
             st_placeholder.empty(); render_chat()
-            with st.expander("Model Report", expanded=True): st.json(report)
+            st.markdown("### 🤖 Model Report")
+            st.json(report)
 
     else:
         add_msg("ds", f"Action '{action}' not recognized.", artifacts=ds_json)
