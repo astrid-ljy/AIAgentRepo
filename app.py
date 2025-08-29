@@ -42,6 +42,10 @@ Responsibilities:
 - Decide the best next action for DS: overview|sql|calc|feature_engineering|modeling|what_if.
 - After DS executes, evaluate results and provide concise feedback to DS.
 
+HARD RULES:
+- If the CEO asks for "what data do we have", or asks to "show first 5 rows" or "preview tables", you MUST set next_action_type="overview".
+- In that case, explicitly tell DS to show the FIRST 5 ROWS for EACH TABLE plus a basic summary (rows, columns) for each table.
+
 Return ONLY valid JSON:
 {
   "am_brief": "1-3 sentences for the CEO",
@@ -64,6 +68,10 @@ Per AM plan:
 - Decide whether to run SQL/aggregation, feature engineering, modeling, or a simple calculation.
 - When SQL, write DuckDB SQL referencing tables EXACTLY by their names.
 - When modeling, define: task ("classification"|"regression"), target, features, model family ("logistic_regression"|"random_forest"|"linear_regression"|"random_forest_regressor"). (Python will actually train.)
+
+HARD RULES:
+- If AM's plan or CEO request is about "what data do we have" or "first 5 rows"/"preview", you MUST return action="overview".
+- Under action="overview", you MUST output the FIRST 5 ROWS for EACH TABLE and include a basic summary for each table: {"rows": N, "cols": M}.
 
 Return ONLY valid JSON:
 {
@@ -123,7 +131,7 @@ with st.sidebar:
         st.session_state.pending_prompt = ""
     c1, c2 = st.columns(2)
     if c1.button("What data do we have?"):
-        st.session_state.pending_prompt = "What data do we have? Please walk me through each table briefly with previews."
+        st.session_state.pending_prompt = "What data do we have? Please walk me through each table with first 5 rows and row/column counts."
     if c2.button("Where can we improve profit quickly?"):
         st.session_state.pending_prompt = "Where can we improve profit quickly? Start with a high-level plan."
 
@@ -217,13 +225,10 @@ def run_duckdb_sql(tables: Dict[str, pd.DataFrame], sql: str) -> pd.DataFrame:
 def summarize_tables(tables: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
     out = {}
     for name, df in tables.items():
-        miss = (df.isna().sum() / max(len(df),1)).round(3).to_dict()
         out[name] = {
             "rows": int(len(df)),
             "cols": int(len(df.columns)),
-            "missing_fraction": miss,
             "sample": df.head(5).to_dict(orient="records"),  # first 5 rows
-            "schema": "\n".join([f"- {c} ({str(df[c].dtype)})" for c in df.columns])
         }
     return out
 
@@ -261,6 +266,33 @@ def processing_done(status_obj, label="Done"):
     add_msg("system", f"✅ {label}")
     st_placeholder.empty(); render_chat()
 
+# --- Force-overview detector ---
+def wants_overview(text: str) -> bool:
+    t = (text or "").lower()
+    triggers = [
+        "what data do we have",
+        "what data do i have",
+        "first 5 rows",
+        "first five rows",
+        "preview tables",
+        "table preview",
+        "show tables",
+        "show me tables",
+        "data overview",
+    ]
+    return any(k in t for k in triggers)
+
+# --- Inline overview renderer ---
+def show_overview_inline():
+    if not st.session_state.tables:
+        return
+    st.markdown("### 📊 Table Previews (first 5 rows) + row/column counts")
+    for name, df in st.session_state.tables.items():
+        st.markdown(f"**{name}** — rows: {len(df)}, cols: {len(df.columns)}")
+        st.dataframe(df.head(5), use_container_width=True)
+    add_msg("ds", "Provided table previews (first 5 rows) plus row/column counts for each table.")
+    st_placeholder.empty(); render_chat()
+
 # =============================
 # Load data (and DS first overview)
 # =============================
@@ -268,9 +300,9 @@ if zip_file is not None and st.session_state.tables is None:
     try:
         st.session_state.tables = load_zip_tables(zip_file)
         add_msg("system", f"Loaded {len(st.session_state.tables)} tables from ZIP.")
-        summaries = summarize_tables(st.session_state.tables)
-        st.session_state.ds_first_overview = summaries
-        add_msg("ds", "Initial data overview completed.", artifacts={"tables": summaries})
+        # store summaries (rows/cols/samples)
+        st.session_state.ds_first_overview = summarize_tables(st.session_state.tables)
+        add_msg("ds", "Initial data overview completed.", artifacts={"tables": st.session_state.ds_first_overview})
     except Exception as e:
         st.error(f"Failed to read ZIP: {e}")
 
@@ -403,13 +435,7 @@ def execute_ds_action(ds_json: dict):
     action = (ds_json.get("action") or "").lower()
 
     if action == "overview":
-        # Show 5 rows for each table directly (inline)
-        st.markdown("### 📊 Table Previews")
-        for name, df in st.session_state.tables.items():
-            st.markdown(f"**{name}** — first 5 rows")
-            st.dataframe(df.head(5), use_container_width=True)
-        add_msg("ds", "Provided previews for each table (first 5 rows).")
-        st_placeholder.empty(); render_chat()
+        show_overview_inline()
 
     elif action == "sql":
         sql = (ds_json.get("duckdb_sql") or "").strip()
@@ -480,6 +506,13 @@ def classify_intent(history: List[dict], latest_user: str) -> str:
 
 def revise_with_feedback(feedback_text: str):
     s = processing_start("Revising based on CEO feedback…")
+    # If the feedback is really "show first 5 rows", just render overview directly
+    if wants_overview(feedback_text):
+        processing_update(s, "DS producing table previews…")
+        show_overview_inline()
+        processing_done(s, "Revision complete")
+        return
+
     bundle = {
         "ceo_prompt": st.session_state.last_user_prompt,
         "feedback_note": feedback_text,
@@ -500,9 +533,14 @@ def revise_with_feedback(feedback_text: str):
             add_msg("am", "Before proceeding, could you clarify:", artifacts={"questions": qs})
             processing_done(s, "Waiting for CEO clarification")
             return
+
     processing_update(s, "DS executing revised plan…")
     ds_json = run_ds_step(am_json)
-    execute_ds_action(ds_json)
+    # If directive/feedback asked for overview, force it
+    if wants_overview(feedback_text) or am_json.get("next_action_type","").lower() == "overview":
+        show_overview_inline()
+    else:
+        execute_ds_action(ds_json)
     processing_done(s, "Revision complete")
 
 def run_turn_ceo(text: str):
@@ -511,6 +549,9 @@ def run_turn_ceo(text: str):
         add_msg("system", "Please upload a ZIP of CSVs first.")
         st_placeholder.empty(); render_chat()
         return
+
+    # If the CEO explicitly wants table previews, do it immediately (and still log AM/DS).
+    immediate_overview = wants_overview(text)
 
     s = processing_start("AM is designing an analytics plan…")
     am_json = run_am_plan(text)
@@ -522,12 +563,15 @@ def run_turn_ceo(text: str):
             add_msg("am", "Before proceeding, could you clarify:", artifacts={"questions": qs})
             processing_done(s, "Waiting for CEO clarification")
             return
-        processing_done(s, "Need more information")
-        return
 
     ds_json = run_ds_step(am_json)
     processing_update(s, "DS decided action; executing…")
-    execute_ds_action(ds_json)
+
+    if immediate_overview or am_json.get("next_action_type","").lower() == "overview" or (ds_json.get("action","").lower()=="overview"):
+        show_overview_inline()
+    else:
+        execute_ds_action(ds_json)
+
     processing_done(s, "Turn complete")
 
 # =============================
