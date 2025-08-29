@@ -1,7 +1,6 @@
 import os
 import io
 import json
-import time
 import zipfile
 from typing import Dict, Any, List
 
@@ -39,11 +38,19 @@ Responsibilities:
 - Face the CEO: restate their request in business terms aiming at PROFIT improvement (revenue ↑, cost ↓, margin ↑).
 - If the CEO message is ambiguous or missing info, ASK 1–3 clarifying questions (set need_more_info=true).
 - Design an analytics plan for DS using ONLY available tables/columns.
-- Decide the best next action for DS: overview|sql|calc|feature_engineering|modeling|what_if.
+- Decide the best next action for DS: overview|sql|calc|feature_engineering|modeling|eda|what_if.
 - After DS executes, evaluate results and provide concise feedback to DS.
 
+Guidance:
+- For broad/open asks like "how can we improve profit?", it is often helpful to start with **EDA**:
+  - sales/revenue trend over time,
+  - top products/customers/regions by revenue or margin,
+  - customer cohorts or repeat rate,
+  - basket/attachment patterns, refund/return hotspots, etc.
+  Return eda as next_action_type="eda" and specify what to plot and from which tables/columns.
+
 HARD RULES:
-- If the CEO asks for "what data do we have", or asks to "show first 5 rows" or "preview tables", you MUST set next_action_type="overview".
+- If the CEO asks "what data do we have", or asks to "show first 5 rows" / "preview tables", you MUST set next_action_type="overview".
 - In that case, explicitly tell DS to show the FIRST 5 ROWS for EACH TABLE plus a basic summary (rows, columns) for each table.
 
 Return ONLY valid JSON:
@@ -51,7 +58,7 @@ Return ONLY valid JSON:
   "am_brief": "1-3 sentences for the CEO",
   "plan_for_ds": "grounded, step-by-step DS instructions using available tables/columns",
   "goal": "profit proxy to improve",
-  "next_action_type": "overview|sql|calc|feature_engineering|modeling|what_if",
+  "next_action_type": "overview|sql|calc|feature_engineering|modeling|eda|what_if",
   "notes_to_ceo": "1-2 plain-language notes",
   "need_more_info": true|false,
   "clarifying_questions": ["q1","q2"]
@@ -61,23 +68,30 @@ Return ONLY valid JSON:
 SYSTEM_DS = r"""
 You are the **Data Scientist (DS)** collaborating with the AM for a CEO.
 
-FIRST RUN behavior:
-- Inspect ALL tables: rows/cols, missingness, sample rows. Propose light cleaning (type casting, trimming, NA fixes) and apply.
+FIRST RUN (first_run=true):
+- Inspect ALL tables ONCE (rows/cols, missingness, sample rows). Propose light cleaning (type casting, NA fixes) and apply if trivial.
+- Save this overview for later reference.
 
-Per AM plan:
-- Decide whether to run SQL/aggregation, feature engineering, modeling, or a simple calculation.
-- When SQL, write DuckDB SQL referencing tables EXACTLY by their names.
-- When modeling, define: task ("classification"|"regression"), target, features, model family ("logistic_regression"|"random_forest"|"linear_regression"|"random_forest_regressor"). (Python will actually train.)
+AFTER FIRST RUN (first_run=false):
+- DO NOT repeat cleaning/inspection unless AM explicitly requests it (e.g., for modeling/feature_engineering).
+- Execute the AM plan directly: overview|sql|calc|feature_engineering|modeling|eda.
 
-HARD RULES:
-- If AM's plan or CEO request is about "what data do we have" or "first 5 rows"/"preview", you MUST return action="overview".
-- Under action="overview", you MUST output the FIRST 5 ROWS for EACH TABLE and include a basic summary for each table: {"rows": N, "cols": M}.
+Key behaviors:
+- overview → present FIRST 5 ROWS for EACH TABLE + {"rows":N,"cols":M}.
+- sql → return DuckDB SQL; Python will run it.
+- calc → describe simple calculation (Python will run if needed).
+- feature_engineering → optionally provide a SQL to assemble base features.
+- modeling → include {"task","target","features","model_family"}; Python trains.
+- eda → provide 1–3 small EDA queries with chart suggestions. Example:
+  {"action":"eda","duckdb_sql":"SELECT date, SUM(revenue) AS rev FROM sales GROUP BY 1 ORDER BY 1",
+   "charts":[{"title":"Revenue by date","type":"line","x":"date","y":"rev"}]}
 
 Return ONLY valid JSON:
 {
   "ds_summary": "what you did/are doing",
-  "action": "overview|sql|calc|feature_engineering|modeling",
+  "action": "overview|sql|calc|feature_engineering|modeling|eda",
   "duckdb_sql": "SQL if action uses SQL else ''",
+  "charts": [{"title":"...", "type":"bar|line|area", "x":"colx", "y":"coly"}],
   "model_plan": {
     "task": "classification|regression|null",
     "target": "existing column or null",
@@ -133,13 +147,13 @@ with st.sidebar:
     if c1.button("What data do we have?"):
         st.session_state.pending_prompt = "What data do we have? Please walk me through each table with first 5 rows and row/column counts."
     if c2.button("Where can we improve profit quickly?"):
-        st.session_state.pending_prompt = "Where can we improve profit quickly? Start with a high-level plan."
+        st.session_state.pending_prompt = "Where can we improve profit quickly? Start with a high-level plan and EDA."
 
 # =============================
 # State
 # =============================
 if "tables" not in st.session_state: st.session_state.tables = None
-if "ds_first_overview" not in st.session_state: st.session_state.ds_first_overview = None
+if "ds_first_overview" not in st.session_state: st.session_state.ds_first_overview = None  # set after initial load
 if "chat" not in st.session_state: st.session_state.chat = []
 if "last_am_json" not in st.session_state: st.session_state.last_am_json = {}
 if "last_ds_json" not in st.session_state: st.session_state.last_ds_json = {}
@@ -157,7 +171,6 @@ def ensure_openai():
 
 def llm_json(system_prompt: str, user_payload: str) -> dict:
     client = ensure_openai()
-    # JSON mode first
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -170,7 +183,6 @@ def llm_json(system_prompt: str, user_payload: str) -> dict:
         )
         return json.loads(resp.choices[0].message.content or "{}")
     except Exception:
-        # Fallback fence
         try:
             resp = client.chat.completions.create(
                 model=model,
@@ -228,7 +240,7 @@ def summarize_tables(tables: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
         out[name] = {
             "rows": int(len(df)),
             "cols": int(len(df.columns)),
-            "sample": df.head(5).to_dict(orient="records"),  # first 5 rows
+            "sample": df.head(5).to_dict(orient="records"),
         }
     return out
 
@@ -300,9 +312,9 @@ if zip_file is not None and st.session_state.tables is None:
     try:
         st.session_state.tables = load_zip_tables(zip_file)
         add_msg("system", f"Loaded {len(st.session_state.tables)} tables from ZIP.")
-        # store summaries (rows/cols/samples)
+        # initial dataset summary (first run)
         st.session_state.ds_first_overview = summarize_tables(st.session_state.tables)
-        add_msg("ds", "Initial data overview completed.", artifacts={"tables": st.session_state.ds_first_overview})
+        add_msg("ds", "Initial data overview saved.", artifacts={"tables": st.session_state.ds_first_overview})
     except Exception as e:
         st.error(f"Failed to read ZIP: {e}")
 
@@ -323,7 +335,7 @@ user_prompt = st.chat_input(
 )
 
 # =============================
-# Modeling
+# Modeling helpers
 # =============================
 def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], family: str) -> Dict[str, Any]:
     report: Dict[str, Any] = {}
@@ -384,7 +396,7 @@ def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], f
             "rmse": float(mean_squared_error(y_test, y_pred, squared=False)),
             "r2": float(r2_score(y_test, y_pred))
         })
-    # (best-effort) top features
+    # best-effort feature importance
     try:
         mdl = pipe.named_steps["model"]
         cat_names = []
@@ -411,8 +423,10 @@ def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], f
 # Core turn handlers
 # =============================
 def run_am_plan(ceo_prompt: str) -> dict:
-    payload = {"ceo_question": ceo_prompt,
-               "tables": {k: list(v.columns) for k, v in (st.session_state.tables or {}).items()}}
+    payload = {
+        "ceo_question": ceo_prompt,
+        "tables": {k: list(v.columns) for k, v in (st.session_state.tables or {}).items()}
+    }
     am_json = llm_json(SYSTEM_AM, json.dumps(payload))
     st.session_state.last_am_json = am_json
     add_msg("am", am_json.get("am_brief",""), artifacts=am_json)
@@ -423,6 +437,7 @@ def run_ds_step(am_json: dict) -> dict:
     ds_payload = {
         "am_plan": am_json.get("plan_for_ds",""),
         "tables": {k: list(v.columns) for k, v in (st.session_state.tables or {}).items()},
+        "first_run": st.session_state.ds_first_overview is None,           # only true before initial load summary set
         "first_run_summary": st.session_state.ds_first_overview or {}
     }
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
@@ -436,6 +451,40 @@ def execute_ds_action(ds_json: dict):
 
     if action == "overview":
         show_overview_inline()
+
+    elif action == "eda":
+        sql = (ds_json.get("duckdb_sql") or "").strip()
+        charts = ds_json.get("charts") or []
+        if sql:
+            try:
+                df = run_duckdb_sql(st.session_state.tables, sql)
+                st.markdown("### 📈 EDA Result (first 50 rows)")
+                st.code(sql, language="sql")
+                st.dataframe(df.head(50), use_container_width=True)
+                # Render simple charts if specified and columns exist
+                for spec in charts[:3]:
+                    title = spec.get("title") or "Chart"
+                    ctype  = (spec.get("type") or "bar").lower()
+                    xcol   = spec.get("x")
+                    ycol   = spec.get("y")
+                    if xcol in df.columns and ycol in df.columns:
+                        st.markdown(f"**{title}**")
+                        plot_df = df[[xcol, ycol]].set_index(xcol)
+                        if ctype == "line":
+                            st.line_chart(plot_df)
+                        elif ctype == "area":
+                            st.area_chart(plot_df)
+                        else:
+                            st.bar_chart(plot_df)
+                add_msg("ds", "EDA query and charts rendered.", artifacts={"sql": sql})
+                st_placeholder.empty(); render_chat()
+            except Exception as e:
+                st.error(f"EDA SQL failed: {e}")
+                add_msg("ds", f"EDA SQL error: {e}", artifacts={"sql": sql})
+                st_placeholder.empty(); render_chat()
+        else:
+            add_msg("ds", "EDA requested but no SQL provided.")
+            st_placeholder.empty(); render_chat()
 
     elif action == "sql":
         sql = (ds_json.get("duckdb_sql") or "").strip()
@@ -468,13 +517,13 @@ def execute_ds_action(ds_json: dict):
                 add_msg("ds", f"Feature SQL error: {e}", artifacts={"sql": sql})
                 st_placeholder.empty(); render_chat()
         if base is None:
-            # pick first table that has target, else first table
             plan = ds_json.get("model_plan") or {}
             tgt = plan.get("target")
             for name, df in st.session_state.tables.items():
                 if tgt and tgt in df.columns:
                     base = df.copy(); break
-            if base is None: base = next(iter(st.session_state.tables.values())).copy()
+            if base is None: 
+                base = next(iter(st.session_state.tables.values())).copy()
 
         if action == "feature_engineering":
             add_msg("ds", "Feature engineering base ready.")
@@ -498,16 +547,13 @@ def execute_ds_action(ds_json: dict):
         st_placeholder.empty(); render_chat()
 
 def classify_intent(history: List[dict], latest_user: str) -> str:
-    # Build compact history for the classifier
     h = [{"role": m["role"], "content": m["content"][:1000]} for m in history[-10:]]
     payload = {"history": h, "latest_user": latest_user}
     out = llm_json(SYSTEM_INTENT, json.dumps(payload))
     return (out or {}).get("intent","new_request")
 
-def revise_with_feedback(feedback_text: str, log_user: bool=False):
-    # Note: log_user is kept for API symmetry; we DON'T re-add the same user text here.
+def revise_with_feedback(feedback_text: str):
     s = processing_start("Revising based on CEO feedback…")
-    # If the feedback is really "show first 5 rows", just render overview directly
     if wants_overview(feedback_text):
         processing_update(s, "DS producing table previews…")
         show_overview_inline()
@@ -537,22 +583,19 @@ def revise_with_feedback(feedback_text: str, log_user: bool=False):
 
     processing_update(s, "DS executing revised plan…")
     ds_json = run_ds_step(am_json)
-    # If directive/feedback asked for overview, force it
     if wants_overview(feedback_text) or am_json.get("next_action_type","").lower() == "overview":
         show_overview_inline()
     else:
         execute_ds_action(ds_json)
     processing_done(s, "Revision complete")
 
-def run_turn_ceo(text: str, log_user: bool=False):
-    # If log_user=True, we would add the user message here, but we already add it once in the main handler.
+def run_turn_ceo(text: str):
     st.session_state.last_user_prompt = text
     if st.session_state.tables is None:
         add_msg("system", "Please upload a ZIP of CSVs first.")
         st_placeholder.empty(); render_chat()
         return
 
-    # If the CEO explicitly wants table previews, do it immediately (and still log AM/DS).
     immediate_overview = wants_overview(text)
 
     s = processing_start("AM is designing an analytics plan…")
@@ -580,18 +623,16 @@ def run_turn_ceo(text: str, log_user: bool=False):
 # Handle CEO message (single logging of user text)
 # =============================
 if user_prompt:
-    # Show the CEO message exactly once
-    add_msg("user", user_prompt)
+    add_msg("user", user_prompt)  # log once
     st_placeholder.empty(); render_chat()
-
     intent = classify_intent(st.session_state.chat, user_prompt)
     if intent == "feedback":
-        revise_with_feedback(user_prompt, log_user=False)
+        revise_with_feedback(user_prompt)
     elif intent == "answers_to_clarifying":
         combined = f"{st.session_state.last_user_prompt}\n\n(CEO clarification:) {user_prompt}"
-        run_turn_ceo(combined, log_user=False)
+        run_turn_ceo(combined)
     else:
-        run_turn_ceo(user_prompt, log_user=False)
+        run_turn_ceo(user_prompt)
 
 # =============================
 # Optional schemas display
@@ -601,4 +642,3 @@ if show_schema and st.session_state.tables:
         for tname, df in st.session_state.tables.items():
             st.markdown(f"**{tname}** — rows: {len(df)}, cols: {len(df.columns)}")
             st.code("\n".join([f"- {c} ({str(df[c].dtype)})" for c in df.columns]), language="markdown")
-
