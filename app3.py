@@ -1,5 +1,3 @@
-# app2.py
-
 import os
 import io
 import re
