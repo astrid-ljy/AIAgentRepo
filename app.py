@@ -302,9 +302,8 @@ if st.session_state.pending_prompt:
     st.session_state.pending_prompt = ""  # consume
 
 user_prompt = st.chat_input(
-    "You're the CEO. Ask in plain language (e.g., 'What data do we have?' 'How to improve profit?')",
-    key=f"chat_input_{time.time()}",
-    placeholder=default_prompt or "e.g., What data do we have?"
+    placeholder=default_prompt or "You're the CEO. Ask in plain language (e.g., 'What data do we have?' or 'How to improve profit?')",
+    key="ceo_chat_input"  # stable key; no need for time()
 )
 
 # =============================
@@ -579,3 +578,4 @@ with st.expander("🛠️ Tips", expanded=False):
     st.write("- Ask “What data do we have?” to see per-table previews. AM plans; DS executes.")
     st.write("- DS can choose overview/SQL/calc/feature engineering/modeling. Modeling runs in Python (scikit-learn).")
     st.write("- Use the feedback box to steer the next iteration toward profit-oriented insights.")
+
