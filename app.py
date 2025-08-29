@@ -213,7 +213,8 @@ def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
     return tables
 
 def duckdb_connect_with_tables(tables: Dict[str, pd.DataFrame]):
-    con = duckdb.connect(database=":memory:")
+    con = duckdb.connect(database=":memory__":
+    )
     for name, df in tables.items():
         con.register(name, df)
     return con
@@ -504,7 +505,8 @@ def classify_intent(history: List[dict], latest_user: str) -> str:
     out = llm_json(SYSTEM_INTENT, json.dumps(payload))
     return (out or {}).get("intent","new_request")
 
-def revise_with_feedback(feedback_text: str):
+def revise_with_feedback(feedback_text: str, log_user: bool=False):
+    # Note: log_user is kept for API symmetry; we DON'T re-add the same user text here.
     s = processing_start("Revising based on CEO feedback…")
     # If the feedback is really "show first 5 rows", just render overview directly
     if wants_overview(feedback_text):
@@ -543,7 +545,8 @@ def revise_with_feedback(feedback_text: str):
         execute_ds_action(ds_json)
     processing_done(s, "Revision complete")
 
-def run_turn_ceo(text: str):
+def run_turn_ceo(text: str, log_user: bool=False):
+    # If log_user=True, we would add the user message here, but we already add it once in the main handler.
     st.session_state.last_user_prompt = text
     if st.session_state.tables is None:
         add_msg("system", "Please upload a ZIP of CSVs first.")
@@ -575,19 +578,21 @@ def run_turn_ceo(text: str):
     processing_done(s, "Turn complete")
 
 # =============================
-# Handle CEO message
+# Handle CEO message (single logging of user text)
 # =============================
 if user_prompt:
+    # Show the CEO message exactly once
     add_msg("user", user_prompt)
     st_placeholder.empty(); render_chat()
+
     intent = classify_intent(st.session_state.chat, user_prompt)
     if intent == "feedback":
-        revise_with_feedback(user_prompt)
+        revise_with_feedback(user_prompt, log_user=False)
     elif intent == "answers_to_clarifying":
         combined = f"{st.session_state.last_user_prompt}\n\n(CEO clarification:) {user_prompt}"
-        run_turn_ceo(combined)
+        run_turn_ceo(combined, log_user=False)
     else:
-        run_turn_ceo(user_prompt)
+        run_turn_ceo(user_prompt, log_user=False)
 
 # =============================
 # Optional schemas display
