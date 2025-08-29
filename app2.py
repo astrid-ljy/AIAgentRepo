@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import json
 import zipfile
 from typing import Dict, Any, List
@@ -18,40 +19,74 @@ from sklearn.metrics import accuracy_score, roc_auc_score, mean_absolute_error, 
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
-# OpenAI
+# --- OpenAI setup ---
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-DEFAULT_MODEL  = st.secrets.get("OPENAI_MODEL",  os.getenv("OPENAI_MODEL",  "gpt-4o-mini"))
+DEFAULT_MODEL = st.secrets.get("OPENAI_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 try:
     from openai import OpenAI
     _OPENAI_AVAILABLE = True
 except Exception:
     _OPENAI_AVAILABLE = False
 
-# ==============================
-# System Prompts
-# ==============================
-SYSTEM_AM = """You are the Analytics Manager (AM)... (same as before, omitted for brevity)"""
-SYSTEM_DS = """You are the Data Scientist (DS)... (same as before)"""
-SYSTEM_AM_REVIEW = """You are the AM Reviewer... (same as before)"""
-SYSTEM_REVIEW = """You are a Coordinator... (same as before)"""
-SYSTEM_INTENT = """You classify intent... (same as before)"""
 
-# ==============================
-# Streamlit Page Config
-# ==============================
-st.set_page_config(page_title="CEO ↔ AM ↔ DS — Profit Assistant", layout="wide")
-st.title("🏢 CEO ↔ AM ↔ DS — Profit Improvement Assistant")
+# ======================
+# System Prompts
+# ======================
+SYSTEM_AM = """You are the Analytics Manager (AM). Plan how to answer the CEO’s business question using the available data.
+Output JSON fields:
+- am_brief: 1–2 sentences paraphrasing the question for a profit-oriented plan (do not repeat verbatim).
+- plan_for_ds: concrete steps referencing ONLY existing tables/columns.
+- goal: profit proxy to improve (revenue ↑, cost ↓, margin ↑).
+- next_action_type: overview|sql|eda|calc|feature_engineering|modeling|what_if
+- notes_to_ceo: 1–2 short notes
+- need_more_info: true|false
+- clarifying_questions: []
+Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement."""
+SYSTEM_DS = """You are the Data Scientist (DS). Execute the AM plan using only available columns.
+Return JSON fields:
+- ds_summary: brief note of intended execution
+- action: overview|sql|eda|calc|feature_engineering|modeling
+- duckdb_sql: SQL string OR list of SQL strings (for eda or feature assembly)
+- charts: optional chart specs; either a flat list (applies to first result) or list-of-lists aligned to multiple eda SQLs. Each spec: {title,type,x,y}
+- model_plan: {task: classification|regression|null, target: str|null, features: [], model_family: logistic_regression|random_forest|linear_regression|random_forest_regressor|null}
+- calc_description: string (if action=calc)
+- assumptions: string
+Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement."""
+SYSTEM_AM_REVIEW = """You are the AM Reviewer. Given CEO question, AM plan, DS action, and lightweight result meta (shapes/samples/metrics),
+write a short *plain-language* summary for the CEO and critique suitability.
+Return JSON fields:
+- summary_for_ceo: 2–4 sentences in plain language
+- appropriateness_check: brief assessment of method/query suitability
+- gaps_or_risks: brief note on assumptions/data issues
+- improvements: [1–4 concrete improvements]
+- suggested_next_steps: [1–4 next actions]
+Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement."""
+SYSTEM_REVIEW = """You are a Coordinator. Produce a concise revision directive for AM & DS when CEO gives feedback.
+Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement."""
+SYSTEM_INTENT = """Classify CEO input as:
+- new_request
+- feedback
+- answers_to_clarifying
+Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement."""
+
+
+# ======================
+# Streamlit config
+# ======================
+st.set_page_config(page_title="CEO ↔ AM ↔ DS", layout="wide")
+st.title("🏢 CEO ↔ AM ↔ DS — Profit Assistant")
 
 with st.sidebar:
     st.header("⚙️ Data")
     zip_file = st.file_uploader("Upload ZIP of CSVs", type=["zip"])
     st.header("🧠 Model")
-    model   = st.text_input("OpenAI model", value=DEFAULT_MODEL)
+    model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     api_key = st.text_input("OPENAI_API_KEY", value=OPENAI_API_KEY, type="password")
 
-# ==============================
+
+# ======================
 # State
-# ==============================
+# ======================
 if "tables" not in st.session_state: st.session_state.tables = None
 if "chat" not in st.session_state: st.session_state.chat = []
 if "last_rendered_idx" not in st.session_state: st.session_state.last_rendered_idx = 0
@@ -59,9 +94,10 @@ if "last_am_json" not in st.session_state: st.session_state.last_am_json = {}
 if "last_ds_json" not in st.session_state: st.session_state.last_ds_json = {}
 if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
 
-# ==============================
+
+# ======================
 # Helpers
-# ==============================
+# ======================
 def ensure_openai():
     if not _OPENAI_AVAILABLE:
         raise RuntimeError("OpenAI SDK missing.")
@@ -69,18 +105,48 @@ def ensure_openai():
         raise RuntimeError("Missing OPENAI_API_KEY")
     return OpenAI(api_key=api_key)
 
+
 def llm_json(system_prompt: str, user_payload: str) -> dict:
     client = ensure_openai()
-    resp = client.chat.completions.create(
-        model=model,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_payload},
-        ],
-        temperature=0.0,
-    )
-    return json.loads(resp.choices[0].message.content or "{}")
+
+    sys_msg = system_prompt.strip() + "\n\nReturn ONLY JSON. This contains the word json."
+    user_msg = (user_payload or "").strip() + "\n\nPlease respond with JSON only."
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.0,
+        )
+        return json.loads(resp.choices[0].message.content or "{}")
+    except Exception as e1:
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": user_msg + "\n\nIf needed, wrap JSON in ```json fences."},
+                ],
+                temperature=0.0,
+            )
+            raw = resp.choices[0].message.content or ""
+        except Exception as e2:
+            return {"_error": str(e1), "_fallback_error": str(e2)}
+
+        m = re.search(r"```json\s*(\{.*?\})\s*```", raw, re.DOTALL | re.IGNORECASE)
+        if m:
+            try: return json.loads(m.group(1))
+            except: pass
+        m2 = re.search(r"(\{.*\})", raw, re.DOTALL)
+        if m2:
+            try: return json.loads(m2.group(1))
+            except: pass
+        return {"_raw": raw, "_parse_error": True}
+
 
 def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
     tables = {}
@@ -90,8 +156,12 @@ def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
             with z.open(name) as f:
                 df = pd.read_csv(io.BytesIO(f.read()))
             key = os.path.splitext(os.path.basename(name))[0]
+            i, base = 1, key
+            while key in tables:
+                key = f"{base}_{i}"; i += 1
             tables[key] = df
     return tables
+
 
 def run_duckdb_sql(tables: Dict[str, pd.DataFrame], sql: str) -> pd.DataFrame:
     con = duckdb.connect(database=":memory:")
@@ -99,8 +169,10 @@ def run_duckdb_sql(tables: Dict[str, pd.DataFrame], sql: str) -> pd.DataFrame:
         con.register(name, df)
     return con.execute(sql).df()
 
+
 def add_msg(role, content, artifacts=None):
     st.session_state.chat.append({"role": role, "content": content, "artifacts": artifacts or {}})
+
 
 def render_chat(incremental=True):
     msgs = st.session_state.chat
@@ -113,17 +185,18 @@ def render_chat(incremental=True):
                     st.json(m["artifacts"])
     st.session_state.last_rendered_idx = len(msgs)
 
+
 def _sql_first(maybe_sql):
     if isinstance(maybe_sql, str): return maybe_sql.strip()
     if isinstance(maybe_sql, list):
         for s in maybe_sql:
-            if isinstance(s, str) and s.strip():
-                return s.strip()
+            if isinstance(s, str) and s.strip(): return s.strip()
     return ""
 
-# ==============================
-# Model Training (unchanged)
-# ==============================
+
+# ======================
+# Train model
+# ======================
 def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], family: str) -> Dict[str, Any]:
     report: Dict[str, Any] = {}
     if target not in df.columns:
@@ -145,7 +218,7 @@ def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], f
     )
 
     if task == "classification":
-        if not pd.api.types.is_numeric_dtype(y): 
+        if not pd.api.types.is_numeric_dtype(y):
             y = pd.Categorical(y).codes
         if family in ("random_forest", "rf"):
             model = RandomForestClassifier(n_estimators=300, random_state=42)
@@ -184,94 +257,260 @@ def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], f
             "rmse": float(mean_squared_error(y_test, y_pred, squared=False)),
             "r2": float(r2_score(y_test, y_pred))
         })
-
-    # feature importances / coefficients
-    try:
-        mdl = pipe.named_steps["model"]
-        cat_names = []
-        try:
-            ohe = pipe.named_steps["pre"].named_transformers_["cat"].named_steps["ohe"]
-            cat_names = list(ohe.get_feature_names_out(cat_cols))
-        except Exception:
-            pass
-        all_names = num_cols + cat_names
-        if hasattr(mdl, "feature_importances_"):
-            imps = mdl.feature_importances_
-            idx = np.argsort(imps)[::-1][:20]
-            report["top_features"] = [{"name": all_names[i], "importance": float(imps[i])} for i in idx if i < len(all_names)]
-        elif hasattr(mdl, "coef_"):
-            coef = np.ravel(mdl.coef_)
-            idx = np.argsort(np.abs(coef))[::-1][:20]
-            report["top_features"] = [{"name": all_names[i], "coef": float(coef[i])} for i in idx if i < len(all_names)]
-    except Exception:
-        pass
-
     return report
 
-# ==============================
-# AM/DS/Review Steps
-# ==============================
-def run_am_plan(ceo_prompt: str) -> dict:
-    payload = {"ceo_question": ceo_prompt, "tables": {k: list(v.columns) for k,v in (st.session_state.tables or {}).items()}}
-    am_json = llm_json(SYSTEM_AM, json.dumps(payload))
-    st.session_state.last_am_json = am_json
-    add_msg("am", am_json.get("am_brief",""), artifacts=am_json)
-    render_chat()
+
+# ======================
+# AM/DS/Review pipeline
+# ======================
+def run_am_plan(prompt:str)->dict:
+    payload={"ceo_question":prompt,"tables":{k:list(v.columns) for k,v in (st.session_state.tables or {}).items()}}
+    am_json=llm_json(SYSTEM_AM,json.dumps(payload))
+    st.session_state.last_am_json=am_json
+    add_msg("am",am_json.get("am_brief",""),artifacts=am_json); render_chat()
     return am_json
 
-def run_ds_step(am_json: dict) -> dict:
-    ds_payload = {"am_plan": am_json.get("plan_for_ds",""), "tables": {k: list(v.columns) for k,v in (st.session_state.tables or {}).items()}}
-    ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
-    st.session_state.last_ds_json = ds_json
-    add_msg("ds", ds_json.get("ds_summary",""), artifacts=ds_json)
-    render_chat()
+def run_ds_step(am_json:dict)->dict:
+    ds_payload={"am_plan":am_json.get("plan_for_ds",""),
+                "tables":{k:list(v.columns) for k,v in (st.session_state.tables or {}).items()}}
+    ds_json=llm_json(SYSTEM_DS,json.dumps(ds_payload))
+    st.session_state.last_ds_json=ds_json
+    add_msg("ds",ds_json.get("ds_summary",""),artifacts={"action":ds_json.get("action"),"duckdb_sql":ds_json.get("duckdb_sql")}); render_chat()
     return ds_json
 
-def am_review_before_render(ceo_prompt: str, ds_json: dict, meta: dict):
-    bundle = {"ceo_question": ceo_prompt, "am_plan": st.session_state.last_am_json, "ds_json": ds_json, "meta": meta}
-    return llm_json(SYSTEM_AM_REVIEW, json.dumps(bundle))
+def am_review_before_render(ceo_prompt:str,ds_json:dict,meta:dict):
+    bundle={"ceo_question":ceo_prompt,"am_plan":st.session_state.last_am_json,"ds_json":ds_json,"meta":meta}
+    return llm_json(SYSTEM_AM_REVIEW,json.dumps(bundle))
 
+
+# ======================
+# Execute DS action (AM review → render)
+# ======================
 def execute_ds_action(ds_json: dict):
     action = (ds_json.get("action") or "").lower()
+
+    # ---------- OVERVIEW ----------
+    if action == "overview":
+        # Build meta
+        tables_meta = {name: {"rows": len(df), "cols": len(df.columns)} for name, df in st.session_state.tables.items()}
+        meta = {"type": "overview", "tables": tables_meta}
+        review = am_review_before_render(st.session_state.last_user_prompt, ds_json, meta)
+        add_msg("am", review.get("summary_for_ceo",""), artifacts={
+            "appropriateness_check": review.get("appropriateness_check"),
+            "gaps_or_risks": review.get("gaps_or_risks"),
+            "improvements": review.get("improvements"),
+            "suggested_next_steps": review.get("suggested_next_steps"),
+        })
+        render_chat()
+
+        st.markdown("### 📊 Table Previews (first 5 rows)")
+        for name, df in st.session_state.tables.items():
+            st.markdown(f"**{name}** — rows: {len(df)}, cols: {len(df.columns)}")
+            st.dataframe(df.head(5), width="stretch")
+        add_msg("ds","Overview rendered."); render_chat()
+        return
+
+    # ---------- EDA ----------
+    if action == "eda":
+        raw_sql = ds_json.get("duckdb_sql")
+        sql_list = raw_sql if isinstance(raw_sql, list) else [raw_sql]
+        charts_all = ds_json.get("charts") or []
+
+        if not sql_list:
+            add_msg("ds", "EDA requested but no SQL provided."); render_chat(); return
+
+        # Render up to 3 EDA panes
+        for i, sql in enumerate([_sql_first(s) for s in sql_list][:3]):
+            if not sql: continue
+            try:
+                df = run_duckdb_sql(st.session_state.tables, sql)
+                sample = df.head(10).to_dict(orient="records")
+                meta = {"type": "eda", "rows": len(df), "cols": list(df.columns), "sql": sql, "sample": sample}
+                review = am_review_before_render(st.session_state.last_user_prompt, ds_json, meta)
+                if i == 0:
+                    add_msg("am", review.get("summary_for_ceo",""), artifacts={
+                        "appropriateness_check": review.get("appropriateness_check"),
+                        "gaps_or_risks": review.get("gaps_or_risks"),
+                        "improvements": review.get("improvements"),
+                        "suggested_next_steps": review.get("suggested_next_steps"),
+                    })
+                    render_chat()
+
+                st.markdown(f"### 📈 EDA Result #{i+1} (first 50 rows)")
+                st.code(sql, language="sql")
+                st.dataframe(df.head(50), width="stretch")
+
+                # Select charts for this pane
+                charts_this = []
+                if charts_all and isinstance(charts_all[0], dict):
+                    charts_this = charts_all if i == 0 else []  # flat list → apply to first result only
+                elif charts_all and isinstance(charts_all[0], list):
+                    charts_this = charts_all[i] if i < len(charts_all) else []
+
+                for spec in (charts_this or [])[:3]:
+                    title = spec.get("title") or "Chart"
+                    ctype = (spec.get("type") or "bar").lower()
+                    xcol  = spec.get("x"); ycol = spec.get("y")
+                    if isinstance(xcol, str) and isinstance(ycol, str) and xcol in df.columns and ycol in df.columns:
+                        st.markdown(f"**{title}**")
+                        plot_df = df[[xcol, ycol]].set_index(xcol)
+                        if ctype == "line": st.line_chart(plot_df)
+                        elif ctype == "area": st.area_chart(plot_df)
+                        else: st.bar_chart(plot_df)
+
+            except Exception as e:
+                st.error(f"EDA SQL failed: {e}")
+                add_msg("ds", f"EDA SQL error: {e}", artifacts={"sql": sql}); render_chat()
+
+        add_msg("ds","EDA rendered."); render_chat()
+        return
+
+    # ---------- SQL ----------
     if action == "sql":
         sql = _sql_first(ds_json.get("duckdb_sql"))
-        df = run_duckdb_sql(st.session_state.tables, sql)
-        meta = {"rows": len(df), "cols": list(df.columns), "sample": df.head(5).to_dict("records")}
+        if not sql:
+            add_msg("ds","No SQL provided."); render_chat(); return
+        try:
+            out = run_duckdb_sql(st.session_state.tables, sql)
+            meta = {"type":"sql","rows": len(out), "cols": list(out.columns), "sql": sql,
+                    "sample": out.head(10).to_dict(orient="records")}
+            review = am_review_before_render(st.session_state.last_user_prompt, ds_json, meta)
+            add_msg("am", review.get("summary_for_ceo",""), artifacts={
+                "appropriateness_check": review.get("appropriateness_check"),
+                "gaps_or_risks": review.get("gaps_or_risks"),
+                "improvements": review.get("improvements"),
+                "suggested_next_steps": review.get("suggested_next_steps"),
+            })
+            render_chat()
+
+            st.markdown("### 🧮 SQL Results (first 25 rows)")
+            st.code(sql, language="sql")
+            st.dataframe(out.head(25), width="stretch")
+
+            add_msg("ds","SQL executed.", artifacts={"sql": sql}); render_chat()
+        except Exception as e:
+            st.error(f"SQL failed: {e}")
+            add_msg("ds", f"SQL error: {e}", artifacts={"sql": sql}); render_chat()
+        return
+
+    # ---------- CALC ----------
+    if action == "calc":
+        desc = ds_json.get("calc_description","(no description)")
+        meta = {"type":"calc","desc": desc}
         review = am_review_before_render(st.session_state.last_user_prompt, ds_json, meta)
-        add_msg("am", review.get("summary_for_ceo",""), artifacts=review)
+        add_msg("am", review.get("summary_for_ceo",""), artifacts={
+            "appropriateness_check": review.get("appropriateness_check"),
+            "gaps_or_risks": review.get("gaps_or_risks"),
+            "improvements": review.get("improvements"),
+            "suggested_next_steps": review.get("suggested_next_steps"),
+        })
         render_chat()
-        st.dataframe(df.head(25), width="stretch")
+        add_msg("ds", f"Calculation: {desc}"); render_chat()
+        return
 
-# (Similar for overview, eda, modeling ...)
+    # ---------- FEATURE ENGINEERING ----------
+    if action == "feature_engineering":
+        base = None
+        sql = _sql_first(ds_json.get("duckdb_sql"))
+        if sql:
+            try:
+                base = run_duckdb_sql(st.session_state.tables, sql)
+            except Exception as e:
+                st.error(f"Feature SQL failed: {e}")
+                add_msg("ds", f"Feature SQL error: {e}", artifacts={"sql": sql}); render_chat()
+        if base is None:
+            # fallback: pick first table
+            base = next(iter(st.session_state.tables.values())).copy()
 
-# ==============================
-# Turn Coordinator
-# ==============================
-def run_turn_ceo(text: str):
-    st.session_state.last_user_prompt = text
-    am_json = run_am_plan(text)
+        meta = {"type":"feature_engineering", "rows": len(base), "cols": list(base.columns),
+                "sample": base.head(10).to_dict(orient="records")}
+        review = am_review_before_render(st.session_state.last_user_prompt, ds_json, meta)
+        add_msg("am", review.get("summary_for_ceo",""), artifacts={
+            "appropriateness_check": review.get("appropriateness_check"),
+            "gaps_or_risks": review.get("gaps_or_risks"),
+            "improvements": review.get("improvements"),
+            "suggested_next_steps": review.get("suggested_next_steps"),
+        })
+        render_chat()
+
+        st.markdown("### 🧱 Feature Engineering Base (first 20 rows)")
+        st.dataframe(base.head(20), width="stretch")
+        add_msg("ds","Feature base ready."); render_chat()
+        return
+
+    # ---------- MODELING ----------
+    if action == "modeling":
+        sql = _sql_first(ds_json.get("duckdb_sql"))
+        base = None
+        if sql:
+            try:
+                base = run_duckdb_sql(st.session_state.tables, sql)
+            except Exception as e:
+                st.error(f"Feature SQL failed: {e}")
+                add_msg("ds", f"Feature SQL error: {e}", artifacts={"sql": sql}); render_chat()
+        if base is None:
+            # attempt to use any table containing target
+            plan = ds_json.get("model_plan") or {}
+            tgt = plan.get("target")
+            for name, df in st.session_state.tables.items():
+                if tgt and tgt in df.columns:
+                    base = df.copy(); break
+            if base is None:
+                base = next(iter(st.session_state.tables.values())).copy()
+
+        plan = ds_json.get("model_plan") or {}
+        task   = (plan.get("task") or "classification").lower()
+        target = plan.get("target")
+        feats  = plan.get("features") or []
+        family = (plan.get("model_family") or "logistic_regression").lower()
+        report = train_model(base, task, target, feats, family)
+
+        meta = {"type":"modeling","task":task,"target":target,"features":feats,"family":family,"report":report}
+        review = am_review_before_render(st.session_state.last_user_prompt, ds_json, meta)
+        add_msg("am", review.get("summary_for_ceo",""), artifacts={
+            "appropriateness_check": review.get("appropriateness_check"),
+            "gaps_or_risks": review.get("gaps_or_risks"),
+            "improvements": review.get("improvements"),
+            "suggested_next_steps": review.get("suggested_next_steps"),
+        })
+        render_chat()
+
+        st.markdown("### 🤖 Model Report")
+        st.json(report)
+        add_msg("ds", "Model trained.", artifacts={"model_report": report}); render_chat()
+        return
+
+    # ---------- Unknown ----------
+    add_msg("ds", f"Action '{action}' not recognized.", artifacts=ds_json); render_chat()
+
+
+# ======================
+# Coordinator
+# ======================
+def run_turn_ceo(text:str):
+    st.session_state.last_user_prompt=text
+    am_json=run_am_plan(text)
     if am_json.get("need_more_info"):
         add_msg("am","Could you clarify?",artifacts=am_json); render_chat(); return
-    ds_json = run_ds_step(am_json)
+    ds_json=run_ds_step(am_json)
     execute_ds_action(ds_json)
 
-# ==============================
-# Data Loading
-# ==============================
-if zip_file and st.session_state.tables is None:
-    st.session_state.tables = load_zip_tables(zip_file)
-    add_msg("system", f"Loaded {len(st.session_state.tables)} tables.")
-    render_chat()
 
-# ==============================
+# ======================
+# Data loading
+# ======================
+if zip_file and st.session_state.tables is None:
+    st.session_state.tables=load_zip_tables(zip_file)
+    add_msg("system",f"Loaded {len(st.session_state.tables)} tables."); render_chat()
+
+
+# ======================
 # Chat UI
-# ==============================
+# ======================
 st.subheader("Chat")
 render_chat()
 
-user_prompt = st.chat_input("You're the CEO. Ask a question (e.g., 'What data do we have?' or 'How to improve profit?')")
-
+user_prompt=st.chat_input("You're the CEO. Ask a question (e.g., 'What data do we have?' or 'How to improve profit?')")
 if user_prompt:
-    add_msg("user", user_prompt)
-    render_chat()
+    add_msg("user",user_prompt); render_chat()
     run_turn_ceo(user_prompt)
