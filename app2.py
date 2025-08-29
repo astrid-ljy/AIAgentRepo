@@ -124,9 +124,89 @@ def _sql_first(maybe_sql):
 # ==============================
 # Model Training (unchanged)
 # ==============================
-def train_model(...):
-    # same as your earlier implementation
-    pass
+def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], family: str) -> Dict[str, Any]:
+    report: Dict[str, Any] = {}
+    if target not in df.columns:
+        return {"error": f"Target '{target}' not found."}
+
+    X = df[features] if features else df.drop(columns=[target], errors="ignore")
+    y = df[target]
+
+    num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
+    cat_cols = [c for c in X.columns if c not in num_cols]
+
+    pre = ColumnTransformer(
+        transformers=[
+            ("num", Pipeline([("imp", SimpleImputer(strategy="median"))]), num_cols),
+            ("cat", Pipeline([("imp", SimpleImputer(strategy="most_frequent")),
+                              ("ohe", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+        ],
+        remainder="drop",
+    )
+
+    if task == "classification":
+        if not pd.api.types.is_numeric_dtype(y): 
+            y = pd.Categorical(y).codes
+        if family in ("random_forest", "rf"):
+            model = RandomForestClassifier(n_estimators=300, random_state=42)
+            fam = "random_forest"
+        else:
+            model = LogisticRegression(max_iter=1000)
+            fam = "logistic_regression"
+    else:
+        if family in ("random_forest_regressor", "random_forest", "rf"):
+            model = RandomForestRegressor(n_estimators=300, random_state=42)
+            fam = "random_forest_regressor"
+        else:
+            model = LinearRegression()
+            fam = "linear_regression"
+
+    pipe = Pipeline([("pre", pre), ("model", model)])
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=42, stratify=y if task=="classification" else None
+    )
+    pipe.fit(X_train, y_train)
+    y_pred = pipe.predict(X_test)
+
+    report.update({"task": task, "target": target, "features": features, "model_family": fam})
+
+    if task == "classification":
+        try:
+            proba = pipe.predict_proba(X_test)[:, 1]
+            auc = roc_auc_score(y_test, proba)
+        except Exception:
+            proba, auc = None, None
+        acc = accuracy_score(y_test, (y_pred > 0.5) if proba is not None else y_pred)
+        report.update({"accuracy": float(acc), "roc_auc": (float(auc) if auc is not None else None)})
+    else:
+        report.update({
+            "mae": float(mean_absolute_error(y_test, y_pred)),
+            "rmse": float(mean_squared_error(y_test, y_pred, squared=False)),
+            "r2": float(r2_score(y_test, y_pred))
+        })
+
+    # feature importances / coefficients
+    try:
+        mdl = pipe.named_steps["model"]
+        cat_names = []
+        try:
+            ohe = pipe.named_steps["pre"].named_transformers_["cat"].named_steps["ohe"]
+            cat_names = list(ohe.get_feature_names_out(cat_cols))
+        except Exception:
+            pass
+        all_names = num_cols + cat_names
+        if hasattr(mdl, "feature_importances_"):
+            imps = mdl.feature_importances_
+            idx = np.argsort(imps)[::-1][:20]
+            report["top_features"] = [{"name": all_names[i], "importance": float(imps[i])} for i in idx if i < len(all_names)]
+        elif hasattr(mdl, "coef_"):
+            coef = np.ravel(mdl.coef_)
+            idx = np.argsort(np.abs(coef))[::-1][:20]
+            report["top_features"] = [{"name": all_names[i], "coef": float(coef[i])} for i in idx if i < len(all_names)]
+    except Exception:
+        pass
+
+    return report
 
 # ==============================
 # AM/DS/Review Steps
