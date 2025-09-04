@@ -716,10 +716,10 @@ def run_turn_ceo(new_text: str):
     intent = classify_intent(prev, new_text)
 
     if intent in {"feedback", "answers_to_clarifying"} and prev:
-    effective_q = (prev or "").strip() + "\n\n[Follow-up]: " + (new_text or "").strip()
-    add_msg("system", "Interpreting your message as feedback/clarification on the previous question.")
+        effective_q = (prev or "").strip() + "\n\n[Follow-up]: " + (new_text or "").strip()
+        add_msg("system", "Interpreting your message as feedback/clarification on the previous question.")
     else:
-    effective_q = new_text
+        effective_q = new_text
     if prev:
         st.session_state.threads.append({"question": prev, "parts": []})
         
