@@ -738,20 +738,20 @@ def run_turn_ceo(new_text: str):
             # finalize previous thread
             st.session_state.threads.append({"question": prev, "parts": []})
 
-    # Track "current" for intent classification only (no concatenation)
-st.session_state.current_question = effective_q
-st.session_state.last_user_prompt = new_text
-
-# 0) Column hints from RAW + FE
-col_hints = build_column_hints(effective_q)
-
-# 1) AM plan (with inventory short-circuit in prompts but still reviewed) and guide.get("questions_for_ceo"):
-            add_msg("am", "Before proceeding, could you clarify:")
-            for q in guide["questions_for_ceo"][:3]:
-                add_msg("am", f"• {q}")
-            render_chat()
-            return
-
+        # Track "current" for intent classification only (no concatenation)
+    st.session_state.current_question = effective_q
+    st.session_state.last_user_prompt = new_text
+    
+    # 0) Column hints from RAW + FE
+    col_hints = build_column_hints(effective_q)
+    
+    # 1) AM plan (with inventory short-circuit in prompts but still reviewed) and guide.get("questions_for_ceo"):
+    add_msg("am", "Before proceeding, could you clarify:")
+    for q in guide["questions_for_ceo"][:3]:
+        add_msg("am", f"• {q}")
+    render_chat()
+    return
+    
     # Build meta & AM review for EVERY DS action
     meta = build_meta(ds_json)
     review = am_review(effective_q, ds_json, meta)
@@ -763,7 +763,7 @@ col_hints = build_column_hints(effective_q)
         "must_revise": review.get("must_revise"),
         "sufficient_to_answer": review.get("sufficient_to_answer"),
     }); render_chat()
-
+    
     # If AM needs clarification from CEO, ask and pause the run
     if review.get("clarification_needed") and (review.get("clarifying_questions") or []):
         add_msg("am", "Before proceeding, could you clarify:")
@@ -771,12 +771,12 @@ col_hints = build_column_hints(effective_q)
             add_msg("am", f"• {q}")
         render_chat();
         return
-
+    
     # If sufficient and no revision required → render final and exit
     if review.get("sufficient_to_answer") and not review.get("must_revise"):
         render_final(ds_json)
         return
-
+    
     # Otherwise revise if requested
     if review.get("must_revise"):
         ds_json = revise_ds(am_json, ds_json, review, col_hints)
@@ -788,7 +788,7 @@ col_hints = build_column_hints(effective_q)
         ds_json = revise_ds(am_json, ds_json, review_fallback, col_hints)
         add_msg("ds", ds_json.get("ds_summary","(auto-revised)"), artifacts={"action": ds_json.get("action")}); render_chat()
         continue
-
+    
     # If we exit loop without sufficiency, render whatever we have but note limitations
     add_msg("system", "Reached review limit; presenting current best effort with noted caveats.")
     render_final(ds_json)
@@ -796,15 +796,15 @@ col_hints = build_column_hints(effective_q)
     am_json = run_am_plan(effective_q, col_hints)
     if am_json.get("need_more_info"):
         add_msg("am", "Could you clarify?", artifacts=am_json); render_chat(); return
-
+    
     # 2) DS step
     ds_json = run_ds_step(am_json, col_hints)
-
+    
     # 2a) Force OVERVIEW for inventory-style questions (no EDA at this time)
     if is_data_inventory_question(effective_q):
         ds_json = {**ds_json, "action": "overview", "duckdb_sql": None}
         add_msg("system", "Routing to OVERVIEW for data inventory request."); render_chat()
-
+    
     # 3) Build meta & AM review
     meta = build_meta(ds_json)
     review = am_review(effective_q, ds_json, meta)
@@ -816,13 +816,13 @@ col_hints = build_column_hints(effective_q)
         "must_revise": review.get("must_revise"),
     })
     render_chat()
-
+    
     # 4) If must revise, let DS revise once, then render
     if review.get("must_revise") is True:
         ds_json = revise_ds(am_json, ds_json, review, col_hints)
         add_msg("ds", ds_json.get("ds_summary","(revised)"), artifacts={"action": ds_json.get("action")}); render_chat()
         # rebuild meta (optional) and continue to final render
-
+    
     # 5) Final render
     render_final(ds_json)
 
