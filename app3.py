@@ -1,11 +1,9 @@
-# app2.py
-
 import os
 import io
 import re
 import json
 import zipfile
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -15,14 +13,16 @@ import streamlit as st
 from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
     accuracy_score, roc_auc_score, mean_absolute_error,
-    mean_squared_error, r2_score
+    mean_squared_error, r2_score, silhouette_score
 )
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 
 # ---------- OpenAI setup ----------
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
@@ -39,6 +39,7 @@ except Exception:
 # ======================
 SYSTEM_AM = """
 You are the Analytics Manager (AM). Plan how to answer the CEO’s business question using the available data.
+Use the provided `column_hints` to resolve business terms (e.g., revenue → sales) strictly to existing columns.
 Output JSON fields:
 - am_brief: 1–2 sentences paraphrasing the question for a profit-oriented plan (do not repeat verbatim).
 - plan_for_ds: concrete steps referencing ONLY existing tables/columns.
@@ -52,17 +53,14 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 
 SYSTEM_DS = """
 You are the Data Scientist (DS). Execute the AM plan using only available columns.
-
-IMPORTANT: The field "action" MUST be exactly one of:
-["overview","sql","eda","calc","feature_engineering","modeling"]
-Do not invent new labels or variants.
-
+Leverage `column_hints` to map business terms (e.g., revenue → sales/net_sales) to real columns.
+Support clustering by setting model_plan.task="clustering" (with optional n_clusters).
 Return JSON fields:
 - ds_summary: brief note of intended execution
 - action: overview|sql|eda|calc|feature_engineering|modeling
 - duckdb_sql: SQL string OR list of SQL strings (for eda or feature assembly)
 - charts: optional chart specs; either a flat list (applies to first result) or list-of-lists aligned to multiple eda SQLs. Each spec: {title,type,x,y}
-- model_plan: {task: classification|regression|null, target: str|null, features: [], model_family: logistic_regression|random_forest|linear_regression|random_forest_regressor|null}
+- model_plan: {task: classification|regression|clustering|null, target: str|null, features: [], model_family: logistic_regression|random_forest|linear_regression|random_forest_regressor|null, n_clusters: int|null}
 - calc_description: string (if action=calc)
 - assumptions: string
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
@@ -73,11 +71,6 @@ You are the Data Scientist (DS). Revise your prior plan/output based on AM criti
 - Keep to ONLY existing tables/columns.
 - Fix suitability issues AM mentioned.
 - Keep it concise and executable.
-
-IMPORTANT: The field "action" MUST be exactly one of:
-["overview","sql","eda","calc","feature_engineering","modeling"]
-Do not invent new labels or variants.
-
 Return JSON with the SAME schema you use normally:
 { "ds_summary": "...", "action": "...", "duckdb_sql": "... or [...]", "charts": [...], "model_plan": {...}, "calc_description": "...", "assumptions": "..." }
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
@@ -103,13 +96,26 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 """
 
 SYSTEM_INTENT = """
-Classify CEO input as:
+Classify CEO input relative to the `previous_question` as:
 - new_request
 - feedback
 - answers_to_clarifying
-Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
+Return ONLY a single JSON object with {"intent": "..."}. The word "json" is present here to satisfy the API requirement.
 """
 
+SYSTEM_COLMAP = """
+You resolve business terms in the CEO question to actual columns from the provided tables.
+Rules:
+- Only return column names that exist.
+- Prefer measures over IDs when both match (e.g., sales_amount over sales_id).
+- If multiple candidates exist, return a ranked list.
+- Include which table each column comes from.
+Return JSON fields:
+- term_to_columns: { term: [{table: str, column: str}] }
+- suggested_features: [{table: str, column: str}]
+- notes: short guidance on ambiguities
+Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
+"""
 
 # ======================
 # Streamlit config
@@ -128,13 +134,27 @@ with st.sidebar:
 # ======================
 # State
 # ======================
-if "tables" not in st.session_state: st.session_state.tables = None
-if "chat" not in st.session_state: st.session_state.chat = []
+if "tables_raw" not in st.session_state: st.session_state.tables_raw = None  # originals
+if "tables_fe"  not in st.session_state: st.session_state.tables_fe  = {}    # feature-engineered snapshots
+if "tables"     not in st.session_state: st.session_state.tables     = None  # default view (merged)
+if "chat"       not in st.session_state: st.session_state.chat       = []
 if "last_rendered_idx" not in st.session_state: st.session_state.last_rendered_idx = 0
 if "last_am_json" not in st.session_state: st.session_state.last_am_json = {}
 if "last_ds_json" not in st.session_state: st.session_state.last_ds_json = {}
 if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
+if "current_question" not in st.session_state: st.session_state.current_question = ""
+if "threads" not in st.session_state: st.session_state.threads = []  # [{question, parts:[...]}]
 
+# Lightweight business term synonyms (heuristic fallback used before LLM col-map)
+TERM_SYNONYMS: Dict[str, List[str]] = {
+    "revenue": ["revenue", "sales", "sales_amount", "net_sales", "turnover", "gmv", "amount"],
+    "profit": ["profit", "net_income", "margin", "gross_profit", "operating_income"],
+    "cost": ["cost", "cogs", "cost_of_goods_sold", "expense", "expenses", "opex"],
+    "price": ["price", "unit_price", "sale_price", "avg_price"],
+    "quantity": ["quantity", "qty", "units", "volume"],
+    "customer": ["customer", "client", "buyer", "account_id", "customer_id"],
+    "date": ["date", "order_date", "invoice_date", "day", "dt"],
+}
 
 # ======================
 # Helpers
@@ -146,50 +166,39 @@ def ensure_openai():
         raise RuntimeError("Missing OPENAI_API_KEY")
     return OpenAI(api_key=api_key)
 
-def to_jsonable(obj):
-    """Recursively convert arbitrary objects into JSON-safe primitives."""
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe_head__": obj.head(10).to_dict(orient="records")}
-    if isinstance(obj, pd.Series):
-        return obj.tolist()
-    if isinstance(obj, dict):
-        return {str(k): to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple, set)):
-        return [to_jsonable(v) for v in obj]
-    if callable(obj):
-        name = getattr(obj, "__name__", "callable")
-        return f"<<callable:{name}>>"
-    return str(obj)
 
-def llm_json(system_prompt: str, user_payload: Any) -> dict:
+def llm_json(system_prompt: str, user_payload: str) -> dict:
     """
-    JSON-safe, robust wrapper:
-    - Sanitizes payload.
-    - Uses response_format=json_object when possible.
-    - Falls back and extracts fenced/raw JSON.
+    Robust JSON helper:
+    - Ensures 'json' appears in messages (OpenAI requirement when using response_format json_object).
+    - Tries structured mode first; on failure, retries without response_format and parses fenced/raw JSON.
     """
     client = ensure_openai()
-    safe_payload = json.dumps(to_jsonable(user_payload))
-    sys_msg = system_prompt.strip() + "\n\nReturn ONLY a single JSON object. This line contains the word json."
-    user_msg = safe_payload + "\n\nPlease respond with JSON only (a single object)."
 
+    sys_msg = system_prompt.strip() + "\n\nReturn ONLY a single JSON object. This line contains the word json."
+    user_msg = (user_payload or "").strip() + "\n\nPlease respond with JSON only (a single object)."
+
+    # Preferred structured call
     try:
         resp = client.chat.completions.create(
             model=model,
             response_format={"type": "json_object"},
-            messages=[{"role": "system", "content": sys_msg},
-                      {"role": "user", "content": user_msg}],
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ],
             temperature=0.0,
         )
         return json.loads(resp.choices[0].message.content or "{}")
     except Exception as e1:
+        # Fallback: free-form then parse
         try:
             resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "system", "content": sys_msg},
-                          {"role": "user", "content": user_msg + "\n\nIf needed, wrap JSON in ```json fences."}],
+                messages=[
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": user_msg + "\n\nIf needed, wrap JSON in ```json fences."},
+                ],
                 temperature=0.0,
             )
             raw = resp.choices[0].message.content or ""
@@ -206,6 +215,7 @@ def llm_json(system_prompt: str, user_payload: Any) -> dict:
             except Exception: pass
         return {"_raw": raw, "_parse_error": True}
 
+
 def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
     tables = {}
     with zipfile.ZipFile(file) as z:
@@ -220,14 +230,27 @@ def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
             tables[key] = df
     return tables
 
-def run_duckdb_sql(tables: Dict[str, pd.DataFrame], sql: str) -> pd.DataFrame:
+
+def get_all_tables() -> Dict[str, pd.DataFrame]:
+    """Merge raw + feature-engineered, with FE versions accessible via their own names."""
+    out = {}
+    if st.session_state.tables_raw:
+        out.update(st.session_state.tables_raw)
+    if st.session_state.tables_fe:
+        out.update(st.session_state.tables_fe)
+    return out
+
+
+def run_duckdb_sql(sql: str) -> pd.DataFrame:
     con = duckdb.connect(database=":memory:")
-    for name, df in tables.items():
+    for name, df in get_all_tables().items():
         con.register(name, df)
     return con.execute(sql).df()
 
+
 def add_msg(role, content, artifacts=None):
     st.session_state.chat.append({"role": role, "content": content, "artifacts": artifacts or {}})
+
 
 def render_chat(incremental: bool = True):
     msgs = st.session_state.chat
@@ -240,7 +263,9 @@ def render_chat(incremental: bool = True):
                     st.json(m["artifacts"])
     st.session_state.last_rendered_idx = len(msgs)
 
+
 def _sql_first(maybe_sql):
+    """Return first non-empty SQL if input is str or list of str; else ''."""
     if isinstance(maybe_sql, str):
         return maybe_sql.strip()
     if isinstance(maybe_sql, list):
@@ -249,7 +274,9 @@ def _sql_first(maybe_sql):
                 return s.strip()
     return ""
 
+
 def is_data_inventory_question(text: str) -> bool:
+    """Heuristic: force 'overview' for data-inventory prompts."""
     q = (text or "").lower()
     triggers = [
         "what data do we have", "what data do i have", "what data do we have here",
@@ -258,40 +285,106 @@ def is_data_inventory_question(text: str) -> bool:
     ]
     return any(t in q for t in triggers)
 
-# --- Action normalization ---
-ALLOWED_ACTIONS = {
-    "overview", "sql", "eda", "calc", "feature_engineering", "modeling"
-}
-def normalize_action(a: str) -> str:
-    s = (a or "").lower().strip()
-    synonyms = {
-        "overview with data quality checks": "overview",
-        "overview - data quality": "overview",
-        "data quality overview": "overview",
-        "quality_overview": "overview",
-        "exploratory data analysis": "eda",
-        "exploratory-data-analysis": "eda",
-        "eda overview": "eda",
-        "fe": "feature_engineering",
-        "feature engineering": "feature_engineering",
-        "classification": "modeling",
-        "regression": "modeling",
-    }
-    for k, v in synonyms.items():
-        if s == k or k in s:
-            return v
-    for a0 in ALLOWED_ACTIONS:
-        if s.startswith(a0):
-            return a0
-    return s
+
+def classify_intent(previous_question: str, new_text: str) -> str:
+    """LLM-based intent classification with graceful fallback."""
+    try:
+        payload = {"previous_question": previous_question or "", "new_text": new_text}
+        res = llm_json(SYSTEM_INTENT, json.dumps(payload))
+        intent = (res or {}).get("intent")
+        if intent in {"new_request", "feedback", "answers_to_clarifying"}:
+            return intent
+    except Exception:
+        pass
+    # Fallback heuristic: very short or refers to prior result → feedback
+    low = (new_text or "").lower()
+    if any(w in low for w in ["that", "this", "looks", "seems", "instead", "can you also", "why", "how about"]):
+        return "feedback"
+    return "new_request"
 
 
+def build_column_hints(question: str) -> dict:
+    """Use LLM + heuristic synonyms to propose relevant columns across raw + FE tables."""
+    all_tables = get_all_tables()
+    struct = {t: list(df.columns) for t, df in all_tables.items()}
+    hints = {"term_to_columns": {}, "suggested_features": [], "notes": ""}
+    # Heuristic first
+    qlow = (question or "").lower()
+    for term, cands in TERM_SYNONYMS.items():
+        if term in qlow:
+            found = []
+            for table, cols in struct.items():
+                for c in cands:
+                    for col in cols:
+                        if c == col.lower():
+                            found.append({"table": table, "column": col})
+            if found:
+                hints["term_to_columns"][term] = found[:5]
+                hints["suggested_features"].extend(found[:3])
+    # LLM refinement
+    try:
+        payload = {"question": question, "tables": struct}
+        res = llm_json(SYSTEM_COLMAP, json.dumps(payload)) or {}
+        # shallow merge
+        if res.get("term_to_columns"):
+            hints["term_to_columns"].update(res.get("term_to_columns"))
+        if res.get("suggested_features"):
+            hints["suggested_features"].extend(res.get("suggested_features"))
+        if res.get("notes"):
+            hints["notes"] = (hints.get("notes") or "") + " " + res["notes"]
+    except Exception:
+        pass
+    # dedupe suggested_features
+    seen = set(); uniq = []
+    for it in hints["suggested_features"]:
+        key = (it.get("table"), it.get("column"))
+        if key not in seen:
+            seen.add(key); uniq.append(it)
+    hints["suggested_features"] = uniq[:20]
+    return hints
+
 # ======================
-# Modeling
+# Modeling (incl. clustering)
 # ======================
-def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], family: str) -> Dict[str, Any]:
+
+def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: List[str], family: str, n_clusters: Optional[int]=None) -> Dict[str, Any]:
     report: Dict[str, Any] = {}
-    if target not in df.columns:
+
+    # ---- Clustering ----
+    if task == "clustering":
+        use_cols = features if features else [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        if not use_cols:
+            return {"error": "No numeric features available for clustering."}
+        X = df[use_cols].copy()
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(X)
+        k = int(n_clusters or 3)
+        kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
+        labels = kmeans.fit_predict(Xs)
+        try:
+            sil = float(silhouette_score(Xs, labels)) if k > 1 else None
+        except Exception:
+            sil = None
+        # PCA for visualization
+        try:
+            p = PCA(n_components=2, random_state=42)
+            coords = p.fit_transform(Xs)
+            coords_df = pd.DataFrame({"pc1": coords[:,0], "pc2": coords[:,1], "cluster": labels})
+        except Exception:
+            coords_df = None
+        sizes = pd.Series(labels).value_counts().sort_index().to_dict()
+        report.update({
+            "task": "clustering",
+            "features": use_cols,
+            "n_clusters": k,
+            "cluster_sizes": {int(k_): int(v) for k_, v in sizes.items()},
+            "inertia": float(getattr(kmeans, "inertia_", np.nan)),
+            "silhouette": sil,
+        })
+        return {"report": report, "labels": labels.tolist(), "pca": coords_df}
+
+    # ---- Supervised ----
+    if target is None or target not in df.columns:
         return {"error": f"Target '{target}' not found."}
 
     X = df[features] if features else df.drop(columns=[target], errors="ignore")
@@ -333,7 +426,7 @@ def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], f
     pipe.fit(X_train, y_train)
     y_pred = pipe.predict(X_test)
 
-    report.update({"task": task, "target": target, "features": features, "model_family": fam})
+    base_report = {"task": task, "target": target, "features": features, "model_family": fam}
 
     if task == "classification":
         try:
@@ -342,48 +435,58 @@ def train_model(df: pd.DataFrame, task: str, target: str, features: List[str], f
         except Exception:
             proba, auc = None, None
         acc = accuracy_score(y_test, (y_pred > 0.5) if proba is not None else y_pred)
-        report.update({"accuracy": float(acc), "roc_auc": (float(auc) if auc is not None else None)})
+        base_report.update({"accuracy": float(acc), "roc_auc": (float(auc) if auc is not None else None)})
     else:
-        report.update({
+        base_report.update({
             "mae": float(mean_absolute_error(y_test, y_pred)),
             "rmse": float(mean_squared_error(y_test, y_pred, squared=False)),
             "r2": float(r2_score(y_test, y_pred))
         })
-    return report
+    return base_report
 
 
 # ======================
 # AM/DS/Review pipeline
 # ======================
-def run_am_plan(prompt: str) -> dict:
-    payload = {"ceo_question": prompt,
-               "tables": {k: list(v.columns) for k, v in (st.session_state.tables or {}).items()}}
-    am_json = llm_json(SYSTEM_AM, payload)
+
+def run_am_plan(prompt: str, column_hints: dict) -> dict:
+    payload = {
+        "ceo_question": prompt,
+        "tables": {k: list(v.columns) for k, v in (get_all_tables() or {}).items()},
+        "column_hints": column_hints,
+    }
+    am_json = llm_json(SYSTEM_AM, json.dumps(payload))
     st.session_state.last_am_json = am_json
     add_msg("am", am_json.get("am_brief", ""), artifacts=am_json)
     render_chat()
     return am_json
 
-def run_ds_step(am_json: dict) -> dict:
-    ds_payload = {"am_plan": am_json.get("plan_for_ds", ""),
-                  "tables": {k: list(v.columns) for k, v in (st.session_state.tables or {}).items()}}
-    ds_json = llm_json(SYSTEM_DS, ds_payload)
-    ds_json["action"] = normalize_action(ds_json.get("action"))  # normalize here
+
+def run_ds_step(am_json: dict, column_hints: dict) -> dict:
+    ds_payload = {
+        "am_plan": am_json.get("plan_for_ds", ""),
+        "tables": {k: list(v.columns) for k, v in (get_all_tables() or {}).items()},
+        "column_hints": column_hints,
+    }
+    ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
     st.session_state.last_ds_json = ds_json
     add_msg("ds", ds_json.get("ds_summary", ""),
             artifacts={"action": ds_json.get("action"),
-                       "duckdb_sql": ds_json.get("duckdb_sql")})
+                       "duckdb_sql": ds_json.get("duckdb_sql"),
+                       "model_plan": ds_json.get("model_plan")})
     render_chat()
     return ds_json
+
 
 def am_review(ceo_prompt: str, ds_json: dict, meta: dict) -> dict:
     bundle = {"ceo_question": ceo_prompt,
               "am_plan": st.session_state.last_am_json,
               "ds_json": ds_json,
               "meta": meta}
-    return llm_json(SYSTEM_AM_REVIEW, bundle)
+    return llm_json(SYSTEM_AM_REVIEW, json.dumps(bundle))
 
-def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict) -> dict:
+
+def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict, column_hints: dict) -> dict:
     payload = {
         "am_plan": am_json.get("plan_for_ds", ""),
         "previous_ds_json": prev_ds_json,
@@ -392,30 +495,30 @@ def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict) -> dict:
             "revision_notes": review_json.get("revision_notes"),
             "gaps_or_risks": review_json.get("gaps_or_risks"),
             "improvements": review_json.get("improvements"),
-        }
+        },
+        "column_hints": column_hints,
     }
-    ds_json = llm_json(SYSTEM_DS_REVISE, payload)
-    ds_json["action"] = normalize_action(ds_json.get("action"))  # normalize revised action
-    return ds_json
+    return llm_json(SYSTEM_DS_REVISE, json.dumps(payload))
 
 
 # ======================
 # Build meta for AM review (no render)
 # ======================
+
 def build_meta(ds_json: dict) -> dict:
     action = (ds_json.get("action") or "").lower()
 
     if action == "overview":
-        tables_meta = {name: {"rows": len(df), "cols": len(df.columns)} for name, df in st.session_state.tables.items()}
+        tables_meta = {name: {"rows": len(df), "cols": len(df.columns)} for name, df in get_all_tables().items()}
         return {"type": "overview", "tables": tables_meta}
 
     if action == "eda":
         raw_sql = ds_json.get("duckdb_sql")
         sql_list = raw_sql if isinstance(raw_sql, list) else [raw_sql]
         metas = []
-        for sql in [_sql_first(s) for s in sql_list if s]:
+        for sql in [_sql_first(s) for s in sql_list if s ]:
             try:
-                df = run_duckdb_sql(st.session_state.tables, sql)
+                df = run_duckdb_sql(sql)
                 metas.append({"sql": sql, "rows": len(df), "cols": list(df.columns),
                               "sample": df.head(10).to_dict(orient="records")})
             except Exception as e:
@@ -426,7 +529,7 @@ def build_meta(ds_json: dict) -> dict:
         sql = _sql_first(ds_json.get("duckdb_sql"))
         if not sql: return {"type": "sql", "error": "No SQL provided"}
         try:
-            out = run_duckdb_sql(st.session_state.tables, sql)
+            out = run_duckdb_sql(sql)
             return {"type": "sql", "sql": sql, "rows": len(out), "cols": list(out.columns),
                     "sample": out.head(10).to_dict(orient="records")}
         except Exception as e:
@@ -438,7 +541,7 @@ def build_meta(ds_json: dict) -> dict:
     if action == "feature_engineering":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         try:
-            base = run_duckdb_sql(st.session_state.tables, sql) if sql else next(iter(st.session_state.tables.values())).copy()
+            base = run_duckdb_sql(sql) if sql else next(iter(get_all_tables().values())).copy()
             return {"type": "feature_engineering", "rows": len(base), "cols": list(base.columns),
                     "sample": base.head(10).to_dict(orient="records")}
         except Exception as e:
@@ -449,16 +552,18 @@ def build_meta(ds_json: dict) -> dict:
         plan = ds_json.get("model_plan") or {}
         target = plan.get("target")
         try:
-            base = run_duckdb_sql(st.session_state.tables, sql) if sql else None
+            base = run_duckdb_sql(sql) if sql else None
             if base is None:
-                for _, df in st.session_state.tables.items():
+                # search both FE and RAW
+                for _, df in get_all_tables().items():
                     if target and target in df.columns:
                         base = df.copy(); break
                 if base is None:
-                    base = next(iter(st.session_state.tables.values())).copy()
+                    base = next(iter(get_all_tables().values())).copy()
             return {"type": "modeling", "task": (plan.get("task") or "classification").lower(),
                     "target": target, "features": plan.get("features") or [],
                     "family": (plan.get("model_family") or "logistic_regression").lower(),
+                    "n_clusters": plan.get("n_clusters"),
                     "rows": len(base), "cols": list(base.columns)}
         except Exception as e:
             return {"type": "modeling", "error": str(e)}
@@ -469,16 +574,19 @@ def build_meta(ds_json: dict) -> dict:
 # ======================
 # Render final result (after review loop)
 # ======================
+
 def render_final(ds_json: dict):
     action = (ds_json.get("action") or "").lower()
 
+    # ---- OVERVIEW ----
     if action == "overview":
         st.markdown("### 📊 Table Previews (first 5 rows)")
-        for name, df in st.session_state.tables.items():
+        for name, df in get_all_tables().items():
             st.markdown(f"**{name}** — rows: {len(df)}, cols: {len(df.columns)}")
             st.dataframe(df.head(5), width="stretch")
         add_msg("ds", "Overview rendered."); render_chat(); return
 
+    # ---- EDA ----
     if action == "eda":
         raw_sql = ds_json.get("duckdb_sql")
         sql_list = raw_sql if isinstance(raw_sql, list) else [raw_sql]
@@ -486,7 +594,7 @@ def render_final(ds_json: dict):
         for i, sql in enumerate([_sql_first(s) for s in sql_list][:3]):
             if not sql: continue
             try:
-                df = run_duckdb_sql(st.session_state.tables, sql)
+                df = run_duckdb_sql(sql)
                 st.markdown(f"### 📈 EDA Result #{i+1} (first 50 rows)")
                 st.code(sql, language="sql")
                 st.dataframe(df.head(50), width="stretch")
@@ -510,12 +618,13 @@ def render_final(ds_json: dict):
                 st.error(f"EDA SQL failed: {e}")
         add_msg("ds","EDA rendered."); render_chat(); return
 
+    # ---- SQL ----
     if action == "sql":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         if not sql:
             add_msg("ds","No SQL provided."); render_chat(); return
         try:
-            out = run_duckdb_sql(st.session_state.tables, sql)
+            out = run_duckdb_sql(sql)
             st.markdown("### 🧮 SQL Results (first 25 rows)")
             st.code(sql, language="sql")
             st.dataframe(out.head(25), width="stretch")
@@ -524,61 +633,94 @@ def render_final(ds_json: dict):
             st.error(f"SQL failed: {e}")
         return
 
+    # ---- CALC ----
     if action == "calc":
         st.markdown("### 🧮 Calculation")
         st.write(ds_json.get("calc_description","(no description)"))
         add_msg("ds","Calculation displayed."); render_chat(); return
 
+    # ---- FEATURE ENGINEERING ----
     if action == "feature_engineering":
         sql = _sql_first(ds_json.get("duckdb_sql"))
-        base = run_duckdb_sql(st.session_state.tables, sql) if sql else next(iter(st.session_state.tables.values())).copy()
+        base = run_duckdb_sql(sql) if sql else next(iter(get_all_tables().values())).copy()
         st.markdown("### 🧱 Feature Engineering Base (first 20 rows)")
         st.dataframe(base.head(20), width="stretch")
-        add_msg("ds","Feature base ready."); render_chat(); return
+        # snapshot FE table for downstream reference
+        st.session_state.tables_fe["feature_base"] = base
+        add_msg("ds","Feature base ready (saved as 'feature_base')."); render_chat(); return
 
+    # ---- MODELING ----
     if action == "modeling":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         plan = ds_json.get("model_plan") or {}
+        task = (plan.get("task") or "classification").lower()
         target = plan.get("target")
-        base = run_duckdb_sql(st.session_state.tables, sql) if sql else None
+        base = run_duckdb_sql(sql) if sql else None
         if base is None:
-            for _, df in st.session_state.tables.items():
-                if target and target in df.columns:
+            # search both FE and RAW
+            for _, df in get_all_tables().items():
+                if (task == "clustering") or (target and target in df.columns):
                     base = df.copy(); break
             if base is None:
-                base = next(iter(st.session_state.tables.values())).copy()
-        report = train_model(base, (plan.get("task") or "classification").lower(),
-                             target, plan.get("features") or [],
-                             (plan.get("model_family") or "logistic_regression").lower())
-        st.markdown("### 🤖 Model Report")
-        st.json(report)
-        add_msg("ds","Model trained.", artifacts={"model_report": report}); render_chat(); return
+                base = next(iter(get_all_tables().values())).copy()
+        if task == "clustering":
+            result = train_model(base, task, None, plan.get("features") or [], plan.get("model_family") or "", plan.get("n_clusters"))
+            rep = result.get("report", {}) if isinstance(result, dict) else {}
+            st.markdown("### 🔍 Clustering Report")
+            st.json(rep)
+            pca_df = result.get("pca")
+            if isinstance(pca_df, pd.DataFrame):
+                st.markdown("**PCA Scatter (by cluster)**")
+                st.dataframe(pca_df.head(200))
+            add_msg("ds","Clustering completed.", artifacts={"report": rep}); render_chat(); return
+        else:
+            report = train_model(base, task, target, plan.get("features") or [], (plan.get("model_family") or "logistic_regression").lower())
+            st.markdown("### 🤖 Model Report")
+            st.json(report)
+            add_msg("ds","Model trained.", artifacts={"model_report": report}); render_chat(); return
 
     add_msg("ds", f"Action '{action}' not recognized.", artifacts=ds_json); render_chat()
 
 
 # ======================
-# Coordinator
+# Coordinator (threading + follow-ups)
 # ======================
-def run_turn_ceo(text: str):
-    st.session_state.last_user_prompt = text
+
+def run_turn_ceo(new_text: str):
+    prev = st.session_state.current_question or ""
+    intent = classify_intent(prev, new_text)
+
+    if intent in {"feedback", "answers_to_clarifying"} and prev:
+        effective_q = prev.strip() + "\n\n[Follow-up]: " + new_text.strip()
+        add_msg("system", f"Interpreting your message as {intent.replace('_',' ')} on the previous question.")
+    else:
+        effective_q = new_text
+        if prev:
+            # finalize previous thread
+            st.session_state.threads.append({"question": prev, "parts": []})
+
+    st.session_state.current_question = effective_q
+    st.session_state.last_user_prompt = new_text
+
+    # 0) Column hints from RAW + FE
+    col_hints = build_column_hints(effective_q)
 
     # 1) AM plan
-    am_json = run_am_plan(text)
+    am_json = run_am_plan(effective_q, col_hints)
     if am_json.get("need_more_info"):
         add_msg("am", "Could you clarify?", artifacts=am_json); render_chat(); return
 
     # 2) DS step
-    ds_json = run_ds_step(am_json)
+    ds_json = run_ds_step(am_json, col_hints)
 
-    # 2a) Force OVERVIEW for inventory-style questions
-    if is_data_inventory_question(text):
+    # 2a) Force OVERVIEW for inventory-style questions (no EDA at this time)
+    if is_data_inventory_question(effective_q):
         ds_json = {**ds_json, "action": "overview", "duckdb_sql": None}
         add_msg("system", "Routing to OVERVIEW for data inventory request."); render_chat()
 
     # 3) Build meta & AM review
     meta = build_meta(ds_json)
-    review = am_review(text, ds_json, meta)
+    review = am_review(effective_q, ds_json, meta)
     add_msg("am", review.get("summary_for_ceo",""), artifacts={
         "appropriateness_check": review.get("appropriateness_check"),
         "gaps_or_risks": review.get("gaps_or_risks"),
@@ -588,10 +730,11 @@ def run_turn_ceo(text: str):
     })
     render_chat()
 
-    # 4) If must revise, DS revises once, then render
+    # 4) If must revise, let DS revise once, then render
     if review.get("must_revise") is True:
-        ds_json = revise_ds(am_json, ds_json, review)
+        ds_json = revise_ds(am_json, ds_json, review, col_hints)
         add_msg("ds", ds_json.get("ds_summary","(revised)"), artifacts={"action": ds_json.get("action")}); render_chat()
+        # rebuild meta (optional) and continue to final render
 
     # 5) Final render
     render_final(ds_json)
@@ -600,9 +743,10 @@ def run_turn_ceo(text: str):
 # ======================
 # Data loading
 # ======================
-if zip_file and st.session_state.tables is None:
-    st.session_state.tables = load_zip_tables(zip_file)
-    add_msg("system", f"Loaded {len(st.session_state.tables)} tables."); render_chat()
+if zip_file and st.session_state.tables_raw is None:
+    st.session_state.tables_raw = load_zip_tables(zip_file)
+    st.session_state.tables = get_all_tables()
+    add_msg("system", f"Loaded {len(st.session_state.tables_raw)} raw tables."); render_chat()
 
 
 # ======================
