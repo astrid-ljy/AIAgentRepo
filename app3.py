@@ -39,13 +39,15 @@ except Exception:
 # ======================
 SYSTEM_AM = """
 You are the Analytics Manager (AM). Plan how to answer the CEO’s business question using the available data.
-**Special rule — Data Inventory:** If the CEO asks variations of “what data do we have,” “what tables,” “show preview,” etc., set next_action_type="overview" only and instruct the DS to output **first 5 rows for each table** with row/column counts. No EDA, feature engineering, modeling, or clustering in this case.
+**Action classification:** You MUST choose exactly one of these actions for DS to perform next: `overview`, `sql`, `eda`, `calc`, `feature_engineering`, or `modeling`. No other values are allowed.
+**Special rule — Data Inventory:** If the CEO asks variations of “what data do we have,” set next_action_type="overview" only and instruct DS to output **first 5 rows for each table**. No EDA/FE/modeling.
 Use the provided `column_hints` to resolve business terms (e.g., revenue → sales) strictly to existing columns.
 Output JSON fields:
 - am_brief: 1–2 sentences paraphrasing the question for a profit-oriented plan (do not repeat verbatim).
 - plan_for_ds: concrete steps referencing ONLY existing tables/columns.
 - goal: profit proxy to improve (revenue ↑, cost ↓, margin ↑).
-- next_action_type: overview|sql|eda|calc|feature_engineering|modeling|what_if
+- next_action_type: overview|sql|eda|calc|feature_engineering|modeling
+- action_reason: short rationale of why this action is appropriate
 - notes_to_ceo: 1–2 short notes
 - need_more_info: true|false
 - clarifying_questions: []
@@ -54,12 +56,13 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 
 SYSTEM_DS = """
 You are the Data Scientist (DS). Execute the AM plan using only available columns.
-**Special rule — Data Inventory:** If AM indicates overview OR the CEO asked “what data do we have,” then your action MUST be "overview" and your output should be previews of the **first 5 rows for each table**. Do NOT run EDA, modeling, or clustering.
+**Obey action:** Your `action` MUST match `am_next_action_type` exactly. Allowed values: overview, sql, eda, calc, feature_engineering, modeling. If a different action would be better, explain briefly in ds_summary but STILL set `action` to `am_next_action_type`.
+**Special rule — Data Inventory:** If AM indicates overview OR the CEO asked “what data do we have,” your action MUST be "overview" and your output should be previews of the **first 5 rows for each table**.
 Leverage `column_hints` to map business terms (e.g., revenue → sales/net_sales) to real columns.
-Support clustering by setting model_plan.task="clustering" (with optional n_clusters).
+Support clustering by setting model_plan.task="clustering" (with optional n_clusters) when `action="modeling"`.
 Return JSON fields:
 - ds_summary: brief note of intended execution
-- action: overview|sql|eda|calc|feature_engineering|modeling
+- action: overview|sql|eda|calc|feature_engineering|modeling  # MUST equal am_next_action_type
 - duckdb_sql: SQL string OR list of SQL strings (for eda or feature assembly)
 - charts: optional chart specs; either a flat list (applies to first result) or list-of-lists aligned to multiple eda SQLs. Each spec: {title,type,x,y}
 - model_plan: {task: classification|regression|clustering|null, target: str|null, features: [], model_family: logistic_regression|random_forest|linear_regression|random_forest_regressor|null, n_clusters: int|null}
@@ -471,6 +474,7 @@ def run_am_plan(prompt: str, column_hints: dict) -> dict:
 def run_ds_step(am_json: dict, column_hints: dict) -> dict:
     ds_payload = {
         "am_plan": am_json.get("plan_for_ds", ""),
+        "am_next_action_type": am_json.get("next_action_type", "eda"),
         "tables": {k: list(v.columns) for k, v in (get_all_tables() or {}).items()},
         "column_hints": column_hints,
     }
@@ -481,6 +485,21 @@ def run_ds_step(am_json: dict, column_hints: dict) -> dict:
                        "duckdb_sql": ds_json.get("duckdb_sql"),
                        "model_plan": ds_json.get("model_plan")})
     render_chat()
+    # Enforce valid/allowed DS action and coerce if needed
+    allowed = {"overview","sql","eda","calc","feature_engineering","modeling"}
+    am_action = (am_json.get("next_action_type") or "").lower()
+    ds_action = (ds_json.get("action") or "").lower()
+    if ds_action not in allowed:
+        # common synonyms → map to closest valid action
+        synonym_map = {
+            "aggregate": "sql", "aggregate_sales": "sql", "aggregation": "sql",
+            "summarize": "sql", "preview": "overview", "analyze": "eda",
+        }
+        ds_action = synonym_map.get(ds_action, am_action or "eda")
+        ds_json["action"] = ds_action
+    # final guard: obey AM when provided
+    if am_action in allowed:
+        ds_json["action"] = am_action
     return ds_json
 
 
@@ -697,7 +716,9 @@ def run_turn_ceo(new_text: str):
     intent = classify_intent(prev, new_text)
 
     if intent in {"feedback", "answers_to_clarifying"} and prev:
-        effective_q = f"{prev.strip()}\n\n[Follow-up]: {new_text.strip()}"
+        effective_q = f"{prev.strip()}
+
+[Follow-up]: {new_text.strip()}"
         add_msg("system", f"Interpreting your message as {intent.replace('_',' ')} on the previous question.")
     else:
         effective_q = new_text
