@@ -68,8 +68,6 @@ Return JSON fields:
 - model_plan: {task: classification|regression|clustering|null, target: str|null, features: [], model_family: logistic_regression|random_forest|linear_regression|random_forest_regressor|null, n_clusters: int|null}
 - calc_description: string (if action=calc)
 - assumptions: string
-- needs_am_input: boolean  # set true when blockers/ambiguities exist
-- questions_for_am: [str]  # DS → AM questions when needs_am_input is true
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
@@ -103,17 +101,6 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 
 SYSTEM_REVIEW = """
 You are a Coordinator. Produce a concise revision directive for AM & DS when CEO gives feedback.
-Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
-"""
-
-SYSTEM_AM_GUIDE = """
-You are the AM Guide. The DS has reported blockers/ambiguities.
-- If you can resolve them directly, produce step-by-step guidance the DS can execute immediately.
-- If you cannot resolve due to missing business input, produce 1–3 concise clarifying questions for the CEO and set reach_out_to_ceo=true.
-Return JSON fields:
-- guidance_for_ds: [str]
-- reach_out_to_ceo: boolean
-- questions_for_ceo: [str]
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
@@ -274,7 +261,7 @@ def add_msg(role, content, artifacts=None):
     st.session_state.chat.append({"role": role, "content": content, "artifacts": artifacts or {}})
 
 
-def render_chat(incremental: bool = True):  # keep entire history; new messages append at bottom
+def render_chat(incremental: bool = True):
     msgs = st.session_state.chat
     start = st.session_state.last_rendered_idx if incremental else 0
     for m in msgs[start:]:
@@ -729,28 +716,38 @@ def run_turn_ceo(new_text: str):
     intent = classify_intent(prev, new_text)
 
     if intent in {"feedback", "answers_to_clarifying"} and prev:
-        # Do NOT merge into previous text; keep conversation chronological
-        effective_q = new_text
-        add_msg("system", "Treating your message as feedback/clarification on the previous question.")
+        effective_q = (prev or "").strip() + "\n\n[Follow-up]: " + (new_text or "").strip()
+        add_msg("system", "Interpreting your message as feedback/clarification on the previous question.")
     else:
         effective_q = new_text
-        if prev:
-            # finalize previous thread
-            st.session_state.threads.append({"question": prev, "parts": []})
-
-    # Track "current" for intent classification only (no concatenation)
-st.session_state.current_question = effective_q
+    if prev:
+        st.session_state.threads.append({"question": prev, "parts": []})
+        
+    st.session_state.current_question = effective_q
     st.session_state.last_user_prompt = new_text
 
     # 0) Column hints from RAW + FE
     col_hints = build_column_hints(effective_q)
 
-    # 1) AM plan (with inventory short-circuit in prompts but still reviewed) and guide.get("questions_for_ceo"):
-                add_msg("am", "Before proceeding, could you clarify:")
-                for q in guide["questions_for_ceo"][:3]:
-                    add_msg("am", f"• {q}")
-                render_chat()
-                return
+    # 1) AM plan (with inventory short-circuit in prompts but still reviewed)
+    am_json = run_am_plan(effective_q, col_hints)
+
+    # If AM needs user info, ask and stop until the CEO replies
+    if am_json.get("need_more_info"):
+        qs = am_json.get("clarifying_questions") or ["Could you clarify your objective?"]
+        add_msg("am", "I need a bit more context:")
+        for q in qs[:3]:
+            add_msg("am", f"• {q}")
+        render_chat();
+        return
+
+    # 2) DS executes and enters review→revise loop
+    max_loops = 3
+    loop_count = 0
+    ds_json = run_ds_step(am_json, col_hints)
+
+    while loop_count < max_loops:
+        loop_count += 1
 
         # Build meta & AM review for EVERY DS action
         meta = build_meta(ds_json)
@@ -762,7 +759,8 @@ st.session_state.current_question = effective_q
             "suggested_next_steps": review.get("suggested_next_steps"),
             "must_revise": review.get("must_revise"),
             "sufficient_to_answer": review.get("sufficient_to_answer"),
-        }); render_chat()
+        })
+        render_chat()
 
         # If AM needs clarification from CEO, ask and pause the run
         if review.get("clarification_needed") and (review.get("clarifying_questions") or []):
