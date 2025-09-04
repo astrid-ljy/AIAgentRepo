@@ -81,6 +81,7 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 SYSTEM_AM_REVIEW = """
 You are the AM Reviewer. Given CEO question, AM plan, DS action, and lightweight result meta (shapes/samples/metrics),
 write a short plain-language summary for the CEO and critique suitability.
+Decide explicitly if the current DS action sufficiently answers the CEO's question.
 Return JSON fields:
 - summary_for_ceo: 2–4 sentences in plain language
 - appropriateness_check: brief assessment of method/query suitability
@@ -88,6 +89,9 @@ Return JSON fields:
 - improvements: [1–4 concrete improvements]
 - suggested_next_steps: [1–4 next actions]
 - must_revise: boolean  # true if DS should revise before showing to CEO
+- sufficient_to_answer: boolean  # true if this DS output answers the CEO's question adequately
+- clarification_needed: boolean  # true if more input from CEO is required (e.g., definitions, scope)
+- clarifying_questions: [str]  # ask the CEO directly when clarification_needed is true
 - revision_notes: string # short guidance for DS on what to fix
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
@@ -693,9 +697,7 @@ def run_turn_ceo(new_text: str):
     intent = classify_intent(prev, new_text)
 
     if intent in {"feedback", "answers_to_clarifying"} and prev:
-        effective_q = prev.strip() + "
-
-[Follow-up]: " + new_text.strip()
+        effective_q = f"{prev.strip()}\n\n[Follow-up]: {new_text.strip()}"
         add_msg("system", f"Interpreting your message as {intent.replace('_',' ')} on the previous question.")
     else:
         effective_q = new_text
@@ -709,28 +711,68 @@ def run_turn_ceo(new_text: str):
     # 0) Column hints from RAW + FE
     col_hints = build_column_hints(effective_q)
 
-    # **Short-circuit for Data Inventory** — no DS planning beyond overview
-    if is_data_inventory_question(effective_q):
-        am_json = {
-            "am_brief": "Listing available datasets with previews for quick scoping.",
-            "plan_for_ds": "Show first 5 rows for each table with row/column counts.",
-            "next_action_type": "overview",
-            "need_more_info": False,
-            "notes_to_ceo": "No modeling or EDA performed for inventory-only request.",
-            "clarifying_questions": []
-        }
-        st.session_state.last_am_json = am_json
-        add_msg("am", am_json.get("am_brief", ""), artifacts=am_json); render_chat()
+    # 1) AM plan (with inventory short-circuit in prompts but still reviewed)
+    am_json = run_am_plan(effective_q, col_hints)
 
-        ds_json = {"ds_summary": "Rendering first 5 rows for each table.", "action": "overview", "duckdb_sql": None}
-        st.session_state.last_ds_json = ds_json
-        add_msg("ds", ds_json.get("ds_summary", ""), artifacts=ds_json); render_chat()
-
-        # Final render: strictly overview
-        render_final(ds_json)
+    # If AM needs user info, ask and stop until the CEO replies
+    if am_json.get("need_more_info"):
+        qs = am_json.get("clarifying_questions") or ["Could you clarify your objective?"]
+        add_msg("am", "I need a bit more context:")
+        for q in qs[:3]:
+            add_msg("am", f"• {q}")
+        render_chat();
         return
 
-    # 1) AM plan
+    # 2) DS executes and enters review→revise loop
+    max_loops = 3
+    loop_count = 0
+    ds_json = run_ds_step(am_json, col_hints)
+
+    while loop_count < max_loops:
+        loop_count += 1
+
+        # Build meta & AM review for EVERY DS action
+        meta = build_meta(ds_json)
+        review = am_review(effective_q, ds_json, meta)
+        add_msg("am", review.get("summary_for_ceo",""), artifacts={
+            "appropriateness_check": review.get("appropriateness_check"),
+            "gaps_or_risks": review.get("gaps_or_risks"),
+            "improvements": review.get("improvements"),
+            "suggested_next_steps": review.get("suggested_next_steps"),
+            "must_revise": review.get("must_revise"),
+            "sufficient_to_answer": review.get("sufficient_to_answer"),
+        })
+        render_chat()
+
+        # If AM needs clarification from CEO, ask and pause the run
+        if review.get("clarification_needed") and (review.get("clarifying_questions") or []):
+            add_msg("am", "Before proceeding, could you clarify:")
+            for q in (review.get("clarifying_questions") or [])[:3]:
+                add_msg("am", f"• {q}")
+            render_chat();
+            return
+
+        # If sufficient and no revision required → render final and exit
+        if review.get("sufficient_to_answer") and not review.get("must_revise"):
+            render_final(ds_json)
+            return
+
+        # Otherwise revise if requested
+        if review.get("must_revise"):
+            ds_json = revise_ds(am_json, ds_json, review, col_hints)
+            add_msg("ds", ds_json.get("ds_summary","(revised)"), artifacts={"action": ds_json.get("action")}); render_chat()
+            continue
+        else:
+            # If not sufficient but also not explicitly must_revise, nudge a targeted revision once
+            review_fallback = {"appropriateness_check": "Not sufficient; attempt targeted refinement.", "revision_notes": "Tighten alignment to CEO question and use column_hints."}
+            ds_json = revise_ds(am_json, ds_json, review_fallback, col_hints)
+            add_msg("ds", ds_json.get("ds_summary","(auto-revised)"), artifacts={"action": ds_json.get("action")}); render_chat()
+            continue
+
+    # If we exit loop without sufficiency, render whatever we have but note limitations
+    add_msg("system", "Reached review limit; presenting current best effort with noted caveats.")
+    render_final(ds_json)
+    return
     am_json = run_am_plan(effective_q, col_hints)
     if am_json.get("need_more_info"):
         add_msg("am", "Could you clarify?", artifacts=am_json); render_chat(); return
