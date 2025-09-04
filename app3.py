@@ -39,6 +39,7 @@ except Exception:
 # ======================
 SYSTEM_AM = """
 You are the Analytics Manager (AM). Plan how to answer the CEO’s business question using the available data.
+**Special rule — Data Inventory:** If the CEO asks variations of “what data do we have,” “what tables,” “show preview,” etc., set next_action_type="overview" only and instruct the DS to output **first 5 rows for each table** with row/column counts. No EDA, feature engineering, modeling, or clustering in this case.
 Use the provided `column_hints` to resolve business terms (e.g., revenue → sales) strictly to existing columns.
 Output JSON fields:
 - am_brief: 1–2 sentences paraphrasing the question for a profit-oriented plan (do not repeat verbatim).
@@ -53,6 +54,7 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 
 SYSTEM_DS = """
 You are the Data Scientist (DS). Execute the AM plan using only available columns.
+**Special rule — Data Inventory:** If AM indicates overview OR the CEO asked “what data do we have,” then your action MUST be "overview" and your output should be previews of the **first 5 rows for each table**. Do NOT run EDA, modeling, or clustering.
 Leverage `column_hints` to map business terms (e.g., revenue → sales/net_sales) to real columns.
 Support clustering by setting model_plan.task="clustering" (with optional n_clusters).
 Return JSON fields:
@@ -691,7 +693,9 @@ def run_turn_ceo(new_text: str):
     intent = classify_intent(prev, new_text)
 
     if intent in {"feedback", "answers_to_clarifying"} and prev:
-        effective_q = prev.strip() + "\n\n[Follow-up]: " + new_text.strip()
+        effective_q = prev.strip() + "
+
+[Follow-up]: " + new_text.strip()
         add_msg("system", f"Interpreting your message as {intent.replace('_',' ')} on the previous question.")
     else:
         effective_q = new_text
@@ -704,6 +708,27 @@ def run_turn_ceo(new_text: str):
 
     # 0) Column hints from RAW + FE
     col_hints = build_column_hints(effective_q)
+
+    # **Short-circuit for Data Inventory** — no DS planning beyond overview
+    if is_data_inventory_question(effective_q):
+        am_json = {
+            "am_brief": "Listing available datasets with previews for quick scoping.",
+            "plan_for_ds": "Show first 5 rows for each table with row/column counts.",
+            "next_action_type": "overview",
+            "need_more_info": False,
+            "notes_to_ceo": "No modeling or EDA performed for inventory-only request.",
+            "clarifying_questions": []
+        }
+        st.session_state.last_am_json = am_json
+        add_msg("am", am_json.get("am_brief", ""), artifacts=am_json); render_chat()
+
+        ds_json = {"ds_summary": "Rendering first 5 rows for each table.", "action": "overview", "duckdb_sql": None}
+        st.session_state.last_ds_json = ds_json
+        add_msg("ds", ds_json.get("ds_summary", ""), artifacts=ds_json); render_chat()
+
+        # Final render: strictly overview
+        render_final(ds_json)
+        return
 
     # 1) AM plan
     am_json = run_am_plan(effective_q, col_hints)
