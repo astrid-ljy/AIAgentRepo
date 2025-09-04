@@ -191,7 +191,6 @@ TERM_SYNONYMS = {
     "product": ["product", "sku", "item"],
 }
 
-
 def build_column_hints(question: str) -> dict:
     struct = {t: list(df.columns) for t, df in get_all_tables().items()}
     hints = {"term_to_columns": {}, "suggested_features": [], "notes": ""}
@@ -207,7 +206,6 @@ def build_column_hints(question: str) -> dict:
 # =====================
 # AM / DS / Review orchestration
 # =====================
-
 def run_am_plan(ceo_question: str, column_hints: dict) -> dict:
     payload = {"ceo_question": ceo_question, "column_hints": column_hints}
     am_json = llm_json(SYSTEM_AM, payload)
@@ -252,7 +250,6 @@ def am_review(ceo_question: str, ds_json: dict, meta: dict) -> dict:
 # =====================
 # Meta & Rendering
 # =====================
-
 def _sql_first(x):
     if isinstance(x, list):
         return x[0] if x else ""
@@ -370,7 +367,6 @@ def render_final(ds_json: dict):
 # =====================
 # Turn runner
 # =====================
-
 def run_turn_ceo(new_text: str):
     # If awaiting clarifications, capture them and continue
     if st.session_state.get("awaiting_user_clarifications"):
