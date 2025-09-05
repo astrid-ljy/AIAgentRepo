@@ -130,7 +130,6 @@ You are a Coordinator. Produce a concise revision directive for AM & DS when CEO
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
-# Minimal column-mapper so build_column_hints doesn't NameError
 SYSTEM_COLMAP = """
 You are a column mapper. Given {tables} (table -> columns) and a business question,
 suggest likely columns for common business terms and up to 10 suggested features.
@@ -367,7 +366,7 @@ def build_column_hints(question: str) -> dict:
             if found:
                 hints["term_to_columns"][term] = found[:5]
                 hints["suggested_features"].extend(found[:3])
-    # LLM refinement (best-effort; safe even if model returns nothing)
+    # LLM refinement
     try:
         payload = {"question": question, "tables": struct}
         res = llm_json(SYSTEM_COLMAP, json.dumps(payload)) or {}
@@ -398,7 +397,6 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
 
     # ---- Clustering ----
     if task == "clustering":
-        # Use only valid numeric features; if none given, fall back to all numeric
         proposed = [c for c in (features or []) if c in df.columns]
         use_cols = [c for c in proposed if pd.api.types.is_numeric_dtype(df[c])]
         if not use_cols:
@@ -594,6 +592,129 @@ def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict, column_hints
         "prior_questions": thread_ctx.get("prior_questions", []),
     }
     return llm_json(SYSTEM_DS_REVISE, json.dumps(payload))
+
+
+# ======================
+# DS output normalization & clustering auto-promotion
+# ======================
+
+def _first_existing_table_with(cols_required: List[str]) -> Optional[str]:
+    """Return the first table name containing ALL required columns; else the first table that contains ANY."""
+    tables = get_all_tables()
+    # prefer ALL
+    for name, df in tables.items():
+        if all(c in df.columns for c in cols_required):
+            return name
+    # fallback ANY
+    for name, df in tables.items():
+        if any(c in df.columns for c in cols_required):
+            return name
+    return None
+
+
+def normalize_ds_output(ds_json: dict, am_json: dict) -> dict:
+    """
+    Ensure DS output is executable:
+    - If missing both 'action' and 'action_sequence', synthesize from AM's intent.
+    - If single-step but missing fields, fill sensible defaults.
+    - If modeling step is clustering but features missing, fall back to all numeric cols.
+    """
+    if not isinstance(ds_json, dict):
+        ds_json = {}
+
+    # If there's a valid sequence, sanitize and keep
+    if ds_json.get("action_sequence"):
+        for step in ds_json["action_sequence"]:
+            step["action"] = _coerce_allowed(step.get("action"), am_json.get("next_action_type") or "eda")
+        return ds_json
+
+    # If single-step missing, synthesize from AM
+    action = (ds_json.get("action") or "").strip().lower()
+    if not action:
+        action = _coerce_allowed(am_json.get("next_action_type"), "eda")
+        ds_json["action"] = action
+
+    # Fill defaults by action
+    if action in {"sql", "eda", "feature_engineering", "modeling"} and not ds_json.get("duckdb_sql"):
+        # Try to pick a sensible table/columns
+        req_cols = ["product_weight_g", "product_length_cm", "product_height_cm", "product_width_cm"]
+        tname = _first_existing_table_with(req_cols) or next(iter(get_all_tables().keys()), None)
+        if tname:
+            # Olist known misspellings
+            maybe_name_len  = "product_name_lenght"
+            maybe_desc_len  = "product_description_lenght"
+            sel_cols = [c for c in ["product_id", *req_cols, "product_photos_qty", maybe_name_len, maybe_desc_len] if c in get_all_tables()[tname].columns]
+            if not sel_cols:
+                sel_cols = list(get_all_tables()[tname].columns)[:8]
+            ds_json["duckdb_sql"] = f"SELECT {', '.join(sel_cols)} FROM {tname}"
+
+    if action == "modeling":
+        # ensure model_plan exists
+        plan = ds_json.get("model_plan") or {}
+        plan.setdefault("task", "clustering")
+        plan.setdefault("n_clusters", 3)
+        # features fallback: numeric columns from the selected SQL table (if possible)
+        try:
+            sql = _sql_first(ds_json.get("duckdb_sql"))
+            base = run_duckdb_sql(sql) if sql else next(iter(get_all_tables().values()))
+            if plan.get("task") == "clustering":
+                proposed = plan.get("features") or []
+                valid = [c for c in proposed if c in base.columns and pd.api.types.is_numeric_dtype(base[c])]
+                if not valid:
+                    valid = [c for c in base.columns if pd.api.types.is_numeric_dtype(base[c])]
+                plan["features"] = valid[:20]
+        except Exception:
+            pass
+        ds_json["model_plan"] = plan
+
+    return ds_json
+
+
+def promote_to_clustering_sequence(am_json: dict, effective_q: str) -> dict:
+    """
+    If the CEO asked for clustering and AM chose single-step, promote to a 3-step sequence:
+    1) feature_engineering → select core dimension features
+    2) eda → quick distribution peek
+    3) modeling → clustering with k=3
+    """
+    text = (effective_q or "").lower()
+    if "cluster" not in text and "clustering" not in text:
+        return am_json
+
+    if (am_json.get("task_mode") or "single") == "multi" and am_json.get("action_sequence"):
+        return am_json  # already multi
+
+    # pick a products-like table
+    req_cols = ["product_weight_g", "product_length_cm", "product_height_cm", "product_width_cm"]
+    tname = _first_existing_table_with(req_cols) or next(iter(get_all_tables().keys()), None)
+    fe_sql = None
+    if tname:
+        maybe_name_len = "product_name_lenght"
+        maybe_desc_len = "product_description_lenght"
+        cols = [c for c in ["product_id", *req_cols, "product_photos_qty", maybe_name_len, maybe_desc_len] if c in get_all_tables()[tname].columns]
+        fe_sql = f"SELECT {', '.join(cols)} FROM {tname}"
+
+    eda_sqls = []
+    if tname and all(c in get_all_tables()[tname].columns for c in req_cols):
+        eda_sqls = [
+            f"SELECT product_length_cm, product_width_cm FROM {tname} WHERE product_length_cm IS NOT NULL AND product_width_cm IS NOT NULL LIMIT 1000",
+            f"SELECT product_height_cm, product_weight_g FROM {tname} WHERE product_height_cm IS NOT NULL AND product_weight_g IS NOT NULL LIMIT 1000",
+        ]
+
+    am_json["task_mode"] = "multi"
+    am_json["next_action_type"] = None
+    am_json["action_sequence"] = [
+        {"action": "feature_engineering", "duckdb_sql": fe_sql or am_json.get("duckdb_sql")},
+        {"action": "eda", "duckdb_sql": eda_sqls or am_json.get("duckdb_sql")},
+        {"action": "modeling", "model_plan": {
+            "task": "clustering",
+            "features": req_cols,   # DS will re-validate
+            "model_family": None,
+            "n_clusters": 3
+        }}
+    ]
+    am_json["action_reason"] = "Clustering requests benefit from FE→EDA→Clustering."
+    return am_json
 
 
 # ======================
@@ -837,6 +958,7 @@ def run_turn_ceo(new_text: str):
 
     # 1) AM plan (with inventory short-circuit in prompts but still reviewed)
     am_json = run_am_plan(effective_q, col_hints, context=thread_ctx)
+    am_json = promote_to_clustering_sequence(am_json, effective_q)
 
     # If AM needs user info, ask and stop until the CEO replies
     if am_json.get("need_more_info"):
@@ -851,6 +973,7 @@ def run_turn_ceo(new_text: str):
     max_loops = 3
     loop_count = 0
     ds_json = run_ds_step(am_json, col_hints, thread_ctx)
+    ds_json = normalize_ds_output(ds_json, am_json)
 
     # If DS asks for clarification explicitly
     if ds_json.get("need_more_info") and (ds_json.get("clarifying_questions") or []):
@@ -924,6 +1047,7 @@ def run_turn_ceo(new_text: str):
         # Otherwise revise if requested
         if review.get("must_revise"):
             ds_json = revise_ds(am_json, ds_json, review, col_hints, thread_ctx)
+            ds_json = normalize_ds_output(ds_json, am_json)
             add_msg("ds", ds_json.get("ds_summary","(revised)"), artifacts={"mode": "multi" if ds_json.get("action_sequence") else "single"})
             render_chat()
             continue
@@ -934,6 +1058,7 @@ def run_turn_ceo(new_text: str):
                 "revision_notes": "Tighten alignment to the central question, follow column_hints strictly, and ensure actions are from the allowed set.",
             }
             ds_json = revise_ds(am_json, ds_json, review_fallback, col_hints, thread_ctx)
+            ds_json = normalize_ds_output(ds_json, am_json)
             add_msg("ds", ds_json.get("ds_summary","(auto-revised)"), artifacts={"mode": "multi" if ds_json.get("action_sequence") else "single"})
             render_chat()
             continue
