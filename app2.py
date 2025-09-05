@@ -350,6 +350,37 @@ def run_duckdb_sql(sql: str) -> pd.DataFrame:
         con.register(name, df)
     return con.execute(sql).df()
 
+def _rewrite_sql_if_missing_product_join(sql: str) -> str:
+    """
+    If a query selects product_id directly from olist_order_reviews_dataset,
+    transparently JOIN to olist_order_items_dataset on order_id.
+    Only triggers when product_id appears and items table is not already present.
+    """
+    try:
+        import re as _re
+    except Exception:
+        return sql
+    if not isinstance(sql, str) or not sql:
+        return sql
+    has_reviews = _re.search(r"\bolist_order_reviews_dataset\b", sql, flags=_re.IGNORECASE)
+    has_items   = _re.search(r"\bolist_order_items_dataset\b", sql, flags=_re.IGNORECASE)
+    needs_prod  = _re.search(r"\bproduct_id\b", sql, flags=_re.IGNORECASE)
+    if has_reviews and needs_prod and not has_items:
+        # Attach a JOIN clause to the first FROM ...reviews...
+        sql = _re.sub(
+            r"FROM\s+olist_order_reviews_dataset(?:\s+\w+)?",
+            "FROM olist_order_reviews_dataset r JOIN olist_order_items_dataset i ON r.order_id = i.order_id",
+            sql,
+            flags=_re.IGNORECASE
+        )
+        # Qualify ambiguous columns
+        sql = _re.sub(r"\bproduct_id\b", "i.product_id", sql, flags=_re.IGNORECASE)
+        sql = _re.sub(r"\breview_score\b", "r.review_score", sql, flags=_re.IGNORECASE)
+        sql = _re.sub(r"\breview_id\b", "r.review_id", sql, flags=_re.IGNORECASE)
+        sql = _re.sub(r"\border_id\b", "r.order_id", sql, flags=_re.IGNORECASE)
+    return sql
+
+
 def add_msg(role, content, artifacts=None):
     st.session_state.chat.append({"role": role, "content": content, "artifacts": artifacts or {}})
 
@@ -643,11 +674,18 @@ def _stratified_sample(df: pd.DataFrame, group_col: str, cap: int) -> pd.DataFra
 def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: List[str], family: str, n_clusters: Optional[int]=None) -> Dict[str, Any]:
     report: Dict[str, Any] = {}
 
+    
     if task == "clustering":
-        use_cols = features if features else [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        use_cols = []
+        if features:
+            use_cols = [c for c in features if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        else:
+            use_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         if not use_cols:
-            return {"error": "No numeric features available for clustering."}
+            return {"error": f"No usable numeric features for clustering. Requested: {features or 'None'}, "
+                             f"available numeric: {[c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]}"}
         X = df[use_cols].copy()
+    
         scaler = StandardScaler()
         Xs = scaler.fit_transform(X)
         k = int(n_clusters or 3)
@@ -858,7 +896,7 @@ def build_meta(ds_json: dict) -> dict:
         metas = []
         for sql in [_sql_first(s) for s in sql_list if s ]:
             try:
-                df = run_duckdb_sql(sql)
+                df = run_duckdb_sql(_rewrite_sql_if_missing_product_join(sql))
                 metas.append({"sql": sql, "rows": len(df), "cols": list(df.columns),
                               "sample": df.head(10).to_dict(orient="records")})
             except Exception as e:
@@ -869,7 +907,7 @@ def build_meta(ds_json: dict) -> dict:
         sql = _sql_first(ds_json.get("duckdb_sql"))
         if not sql: return {"type": "sql", "error": "No SQL provided"}
         try:
-            out = run_duckdb_sql(sql)
+            out = run_duckdb_sql(_rewrite_sql_if_missing_product_join(sql))
             return {"type": "sql", "sql": sql, "rows": len(out), "cols": list(out.columns),
                     "sample": out.head(10).to_dict(orient="records")}
         except Exception as e:
@@ -881,7 +919,7 @@ def build_meta(ds_json: dict) -> dict:
     if action == "feature_engineering":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         try:
-            base = run_duckdb_sql(sql) if sql else next(iter(get_all_tables().values())).copy()
+            base = run_duckdb_sql(_rewrite_sql_if_missing_product_join(sql)) if sql else next(iter(get_all_tables().values())).copy()
             return {"type": "feature_engineering", "rows": len(base), "cols": list(base.columns),
                     "sample": base.head(10).to_dict(orient="records")}
         except Exception as e:
@@ -892,7 +930,7 @@ def build_meta(ds_json: dict) -> dict:
         plan = ds_json.get("model_plan") or {}
         target = plan.get("target")
         try:
-            base = run_duckdb_sql(sql) if sql else None
+            base = run_duckdb_sql(_rewrite_sql_if_missing_product_join(sql)) if sql else None
             if base is None:
                 for _, df in get_all_tables().items():
                     if target and target in df.columns:
@@ -1083,7 +1121,7 @@ def render_final(ds_json: dict):
         for i, sql in enumerate([_sql_first(s) for s in sql_list][:3]):
             if not sql: continue
             try:
-                df = run_duckdb_sql(sql)
+                df = run_duckdb_sql(_rewrite_sql_if_missing_product_join(sql))
                 st.markdown(f"### 📈 EDA Result #{i+1} (first 50 rows)")
                 st.code(sql, language="sql")
                 st.dataframe(df.head(50), use_container_width=True)
@@ -1112,7 +1150,7 @@ def render_final(ds_json: dict):
         if not sql:
             add_msg("ds","No SQL provided."); render_chat(); return
         try:
-            out = run_duckdb_sql(sql)
+            out = run_duckdb_sql(_rewrite_sql_if_missing_product_join(sql))
             st.markdown("### 🧮 SQL Results (first 25 rows)")
             st.code(sql, language="sql")
             st.dataframe(out.head(25), use_container_width=True)
@@ -1128,40 +1166,71 @@ def render_final(ds_json: dict):
 
     if action == "feature_engineering":
         sql = _sql_first(ds_json.get("duckdb_sql"))
-        base = run_duckdb_sql(sql) if sql else next(iter(get_all_tables().values())).copy()
+        base = run_duckdb_sql(_rewrite_sql_if_missing_product_join(sql)) if sql else next(iter(get_all_tables().values())).copy()
         st.markdown("### 🧱 Feature Engineering Base (first 20 rows)")
         st.dataframe(base.head(20), use_container_width=True)
         st.session_state.tables_fe["feature_base"] = base
         add_msg("ds","Feature base ready (saved as 'feature_base')."); render_chat(); return
 
+    
     if action == "modeling":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         plan = ds_json.get("model_plan") or {}
         task = (plan.get("task") or "classification").lower()
         target = plan.get("target")
-        base = run_duckdb_sql(sql) if sql else None
-        if base is None:
-            for _, df in get_all_tables().items():
-                if (task == "clustering") or (target and target in df.columns):
-                    base = df.copy(); break
-            if base is None:
-                base = next(iter(get_all_tables().values())).copy()
-        if task == "clustering":
-            result = train_model(base, task, None, plan.get("features") or [], plan.get("model_family") or "", plan.get("n_clusters"))
-            rep = result.get("report", {}) if isinstance(result, dict) else {}
-            st.markdown("### 🔍 Clustering Report")
-            st.json(rep, expanded=False)
-            pca_df = result.get("pca")
-            if isinstance(pca_df, pd.DataFrame):
-                st.markdown("**PCA Scatter (by cluster)**")
-                st.dataframe(pca_df.head(200), use_container_width=True)
-            add_msg("ds","Clustering completed.", artifacts={"report": rep}); render_chat(); return
-        else:
-            report = train_model(base, task, target, plan.get("features") or [], (plan.get("model_family") or "logistic_regression").lower())
-            st.markdown("### 🤖 Model Report")
-            st.json(report, expanded=False)
-            add_msg("ds","Model trained.", artifacts={"model_report": report}); render_chat(); return
+        base = run_duckdb_sql(_rewrite_sql_if_missing_product_join(sql)) if sql else None
 
+        # 1) Prefer engineered feature base if present
+        if base is None and hasattr(st.session_state, "tables_fe") and "feature_base" in st.session_state.tables_fe:
+            try:
+                base = st.session_state.tables_fe["feature_base"].copy()
+            except Exception:
+                pass
+
+        # 2) If explicit features are requested, pick a table that actually has them
+        req_feats = plan.get("features") or []
+        if base is None and req_feats:
+            for _, __df in get_all_tables().items():
+                try:
+                    if all(f in __df.columns for f in req_feats):
+                        base = __df.copy()
+                        break
+                except Exception:
+                    continue
+
+        # 3) Otherwise fallback to any sensible table depending on task
+        if base is None:
+            for _, __df in get_all_tables().items():
+                if (task == "clustering") or (target and target in __df.columns):
+                    base = __df.copy()
+                    break
+        if base is None:
+            base = next(iter(get_all_tables().values())).copy()
+
+        # Feature presence guard for clustering
+        if task == "clustering":
+            have = []
+            missing = []
+            req_feats = plan.get("features") or []
+            if req_feats:
+                have = [f for f in req_feats if f in base.columns]
+                missing = [f for f in req_feats if f not in base.columns]
+            if missing and have:
+                st.warning(f"Some requested features are missing and will be skipped: {missing}")
+                plan["features"] = have
+            elif missing and not have and req_feats:
+                st.error(f"None of the requested features are present: {missing}. "
+                         f"Available columns: {list(base.columns)[:25]} …")
+                add_msg("ds","Clustering aborted: required features not found.")
+                render_chat()
+                return
+
+            result = train_model(base, task, None, plan.get("features") or [], plan.get("model_family") or "", plan.get("n_clusters"))
+            st.session_state.last_model_result = result
+            _render_model_result(result)
+            add_msg("ds", f"Clustering executed on features: {plan.get('features') or 'auto-numeric selection'}.")
+            render_chat()
+            return
     if action == "aggregate_reviews_from_text":
         tables = get_all_tables()
         if not tables:
