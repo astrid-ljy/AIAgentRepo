@@ -191,6 +191,27 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 """
 
 # ======================
+# State - Initialize FIRST before any UI code
+# ======================
+if "tables_raw" not in st.session_state: st.session_state.tables_raw = None  # originals
+if "tables_fe"  not in st.session_state: st.session_state.tables_fe  = {}    # feature-engineered snapshots
+if "tables"     not in st.session_state: st.session_state.tables     = None  # default view (merged)
+if "chat"       not in st.session_state: st.session_state.chat       = []
+if "last_rendered_idx" not in st.session_state: st.session_state.last_rendered_idx = 0
+if "last_am_json" not in st.session_state: st.session_state.last_am_json = {}
+if "last_ds_json" not in st.session_state: st.session_state.last_ds_json = {}
+if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
+if "current_question" not in st.session_state: st.session_state.current_question = ""
+if "threads" not in st.session_state: st.session_state.threads = []  # [{question, parts:[...]}]
+
+# Enhanced conversation state
+if "conversation_history" not in st.session_state: st.session_state.conversation_history = []
+if "central_question" not in st.session_state: st.session_state.central_question = ""
+if "question_context" not in st.session_state: st.session_state.question_context = {}
+if "ds_action_plan" not in st.session_state: st.session_state.ds_action_plan = []
+if "current_action_index" not in st.session_state: st.session_state.current_action_index = 0
+
+# ======================
 # Streamlit config
 # ======================
 st.set_page_config(page_title="CEO ↔ AM ↔ DS", layout="wide")
@@ -229,28 +250,6 @@ with st.sidebar:
         st.session_state.ds_action_plan = []
         st.session_state.current_action_index = 0
         st.rerun()
-
-
-# ======================
-# State
-# ======================
-if "tables_raw" not in st.session_state: st.session_state.tables_raw = None  # originals
-if "tables_fe"  not in st.session_state: st.session_state.tables_fe  = {}    # feature-engineered snapshots
-if "tables"     not in st.session_state: st.session_state.tables     = None  # default view (merged)
-if "chat"       not in st.session_state: st.session_state.chat       = []
-if "last_rendered_idx" not in st.session_state: st.session_state.last_rendered_idx = 0
-if "last_am_json" not in st.session_state: st.session_state.last_am_json = {}
-if "last_ds_json" not in st.session_state: st.session_state.last_ds_json = {}
-if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
-if "current_question" not in st.session_state: st.session_state.current_question = ""
-if "threads" not in st.session_state: st.session_state.threads = []  # [{question, parts:[...]}]
-
-# Enhanced conversation state
-if "conversation_history" not in st.session_state: st.session_state.conversation_history = []
-if "central_question" not in st.session_state: st.session_state.central_question = ""
-if "question_context" not in st.session_state: st.session_state.question_context = {}
-if "ds_action_plan" not in st.session_state: st.session_state.ds_action_plan = []
-if "current_action_index" not in st.session_state: st.session_state.current_action_index = 0
 
 # Lightweight business term synonyms (heuristic fallback used before LLM col-map)
 TERM_SYNONYMS: Dict[str, List[str]] = {
