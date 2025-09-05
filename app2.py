@@ -464,7 +464,7 @@ def run_review_aggregation(state: Dict[str, Any]):
     if sm["mode"] == "per_product_cap":
         df_work = stratified_sample(df, product_col, sm["cap_per_product"], sm["random_state"])
     else:
-        df_work = df.sample(min(len(df), sm["global_max_reviews"]), random_state=sm["random_state"]))
+        df_work = df.sample(min(len(df), sm["global_max_reviews"]), random_state=sm["random_state"])
 
     # Process
     scored, stats = process_reviews(df_work, product_col, text_col, cfg)
