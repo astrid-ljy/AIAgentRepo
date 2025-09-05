@@ -1036,11 +1036,42 @@ def render_final_for_action(ds_step: dict):
 
 
 # ======================
+# Auto-progression heuristic
+# ======================
+def must_progress_to_modeling(thread_ctx: dict, am_json: dict, ds_json: dict) -> bool:
+    """
+    Decide whether to auto-advance to modeling (usually clustering).
+    Conservative default: False unless the CEO clearly asked for modeling/segmentation
+    and neither AM nor DS already planned to model in this turn.
+    """
+    # If AM already chose modeling or DS is modeling now, no need to force
+    if (am_json.get("next_action_type") or "").lower() == "modeling":
+        return False
+    if (ds_json.get("action") or "").lower() == "modeling":
+        return False
+    if any((isinstance(s, dict) and (s.get("action","").lower() == "modeling"))
+           or (isinstance(s, str) and s.lower() == "modeling")
+           for s in (ds_json.get("action_sequence") or [])):
+        return False
+
+    q = (thread_ctx.get("current_question") or thread_ctx.get("central_question") or "").lower()
+
+    # Do NOT auto-progress on inventory questions
+    if re.search(r"\bwhat (data|datasets?) do we have\b", q) or "first 5 rows" in q:
+        return False
+
+    # Keywords indicating the CEO intends modeling/clustering/segmentation
+    wants_model = any(k in q for k in [
+        "cluster", "clustering", "segment", "segmentation", "kmeans",
+        "unsupervised", "model", "predict", "classification", "regression"
+    ])
+    return bool(wants_model)
+
+
+# ======================
 # Coordinator (threading + arbitration + follow-ups)
 # ======================
 def run_turn_ceo(new_text: str):
-
-
 
     prev = st.session_state.current_question or ""
     central = st.session_state.central_question or ""
@@ -1103,11 +1134,12 @@ def run_turn_ceo(new_text: str):
     loop_count = 0
     ds_json = run_ds_step(am_json, col_hints, thread_ctx)
 
-    
+    # --- FIXED: auto-progression + variable name ---
     if must_progress_to_modeling(thread_ctx, am_json, ds_json):
         am_json = {**am_json, "task_mode":"single", "next_action_type":"modeling", "plan_for_ds": (am_json.get("plan_for_ds") or "") + " | Proceed to clustering."}
-        ds_json = run_ds_step(am_json, column_hints, thread_ctx)
-# If DS asks for clarification explicitly
+        ds_json = run_ds_step(am_json, col_hints, thread_ctx)
+
+    # If DS asks for clarification explicitly
     if ds_json.get("need_more_info") and (ds_json.get("clarifying_questions") or []):
         add_msg("ds", "Before running further steps, I need:")
         for q in (ds_json.get("clarifying_questions") or [])[:3]:
