@@ -50,9 +50,9 @@ You are the Analytics Manager (AM). Plan how to answer the CEO’s business ques
 
 **Follow-up rule:** If the CEO’s message is a follow-up asking to *explain/interpret/what features/what changed*, choose **`explain`** and DO NOT rerun modeling/EDA/SQL. Use cached results; treat the central question as context only.
 
-Use provided `column_hints` to resolve business terms strictly to existing columns.
+Use `column_hints` to map business terms strictly to existing columns.
 
-You can see the CEO's **current question**, the **central question of the active thread**, and **all prior questions**.
+You can see the CEO's **current question**, the **central question**, and **all prior questions**.
 
 Output JSON fields:
 - am_brief
@@ -323,6 +323,14 @@ def _explicit_new_thread(text: str) -> bool:
     return bool(re.search(r"\bnot (a|an)?\s*follow[- ]?up\b", t))
 
 
+def is_inventory_question(text: str) -> bool:
+    q = (text or "").lower()
+    return any(kw in q for kw in [
+        "what data do we have", "first 5 rows", "first five rows", "preview tables",
+        "show tables", "data inventory", "what datasets", "what tables"
+    ])
+
+
 def classify_intent(previous_question: str, central_question: str, prior_questions: List[str], new_text: str) -> dict:
     try:
         payload = {
@@ -450,7 +458,6 @@ def choose_model_base(plan: dict, question_text: str) -> Optional[pd.DataFrame]:
     Browse ALL loaded tables and pick the best single base:
     - If the question mentions product/dimension: pick the table with the MOST numeric dimension-like columns.
     - Else score each table by count of usable numeric features (post filtering) and choose the best.
-    (You can still join with other tables via SQL in earlier steps.)
     """
     tables = get_all_tables()
     if not tables: return None
@@ -654,6 +661,78 @@ def _normalize_sequence(seq, fallback_action) -> List[dict]:
     return out
 
 
+# ---------- Auto-fill missing step details ----------
+def _has_tables(*names) -> bool:
+    t = get_all_tables()
+    return all(n in t for n in names)
+
+def _generate_top_seller_sqls() -> List[str]:
+    # Common Olist naming
+    t_items = "olist_order_items_dataset"
+    t_orders = "olist_orders_dataset"
+    t_products = "olist_products_dataset"
+    sql1 = f"""
+    SELECT oi.product_id, COUNT(*) AS units, SUM(oi.price) AS sales
+    FROM {t_items} AS oi
+    GROUP BY 1
+    ORDER BY units DESC, sales DESC
+    LIMIT 1
+    """
+    sql2 = f"""
+    WITH top_prod AS (
+        {sql1}
+    )
+    SELECT p.*
+    FROM {t_products} p
+    JOIN top_prod t ON p.product_id = t.product_id
+    """
+    return [re.sub(r"\s+", " ", sql1).strip(), re.sub(r"\s+", " ", sql2).strip()]
+
+def _generate_products_dimension_sqls(limit:int=50) -> List[str]:
+    t = "olist_products_dataset"
+    if t not in get_all_tables():
+        return []
+    cols = get_all_tables()[t].columns
+    picks = [c for c in cols if c in ["product_weight_g","product_length_cm","product_height_cm","product_width_cm"]]
+    if not picks: return []
+    sql = f"SELECT product_id, {', '.join(picks)} FROM {t} LIMIT {limit}"
+    return [sql]
+
+def auto_fill_step(step: dict, thread_ctx: dict) -> dict:
+    """Fill missing SQL/model_plan defaults based on question + known Olist schema."""
+    step = dict(step or {})
+    action = (step.get("action") or "").lower()
+    q = (thread_ctx.get("current_question") or "").lower()
+    # SQL defaults
+    if action == "sql" and not _sql_first(step.get("duckdb_sql")):
+        if "top selling" in q or "top-selling" in q or ("more information about this product" in q):
+            if _has_tables("olist_order_items_dataset","olist_products_dataset"):
+                step["duckdb_sql"] = _generate_top_seller_sqls()[0]
+        # otherwise leave as is; AM/DS should have provided a query
+    # EDA defaults
+    if action == "eda" and not _sql_first(step.get("duckdb_sql")):
+        if "dimension" in q and "product" in q and "olist_products_dataset" in get_all_tables():
+            eda_sqls = _generate_products_dimension_sqls(200)
+            if eda_sqls:
+                step["duckdb_sql"] = eda_sqls
+    # FE defaults
+    if action == "feature_engineering" and not _sql_first(step.get("duckdb_sql")):
+        if "olist_products_dataset" in get_all_tables():
+            picks = _generate_products_dimension_sqls(500)
+            if picks:
+                step["duckdb_sql"] = picks[0]
+    # Modeling defaults
+    if action == "modeling":
+        plan = step.get("model_plan") or {}
+        if not plan.get("task"):
+            if "dimension" in q and "product" in q:
+                plan["task"] = "clustering"
+                plan["n_clusters"] = plan.get("n_clusters") or 5
+        # features left empty → auto-feature proposal later
+        step["model_plan"] = plan
+    return step
+
+
 def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     ds_payload = {
         "am_plan": am_json.get("plan_for_ds", ""),
@@ -672,16 +751,22 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     if am_mode == "multi":
         seq = ds_json.get("action_sequence") or am_json.get("action_sequence") or []
         norm_seq = _normalize_sequence(seq, (am_json.get("next_action_type") or "eda").lower())
+        # Auto-fill missing bits
+        norm_seq = [auto_fill_step(s, thread_ctx) for s in norm_seq]
         ds_json["action_sequence"] = norm_seq
         add_msg("ds", ds_json.get("ds_summary", ""), artifacts={"mode": "multi", "sequence": norm_seq})
     else:
         a = _coerce_allowed(ds_json.get("action"), (am_json.get("next_action_type") or "eda").lower())
-        ds_json["action"] = (am_json.get("next_action_type") or a)
-        add_msg("ds", ds_json.get("ds_summary", ""), artifacts={
-            "action": ds_json.get("action"),
+        single = {
+            "action": (am_json.get("next_action_type") or a),
             "duckdb_sql": ds_json.get("duckdb_sql"),
-            "model_plan": ds_json.get("model_plan")
-        })
+            "charts": ds_json.get("charts"),
+            "model_plan": ds_json.get("model_plan"),
+            "calc_description": ds_json.get("calc_description"),
+        }
+        single = auto_fill_step(single, thread_ctx)
+        ds_json = single
+        add_msg("ds", st.session_state.last_ds_json.get("ds_summary",""), artifacts=single)
 
     render_chat()
     return ds_json
@@ -1136,12 +1221,16 @@ def run_turn_ceo(new_text: str):
         # Otherwise revise if requested
         if review.get("must_revise"):
             ds_json = revise_ds(am_json, ds_json, review, col_hints, thread_ctx)
-            # Normalize again in case the LLM returned weird shapes
+            # Normalize again and auto-fill again
             if ds_json.get("action_sequence"):
                 ds_json["action_sequence"] = _normalize_sequence(
                     ds_json.get("action_sequence"),
                     (am_json.get("next_action_type") or "eda").lower()
                 )
+                ds_json["action_sequence"] = [auto_fill_step(s, thread_ctx) for s in ds_json["action_sequence"]]
+            else:
+                ds_json = auto_fill_step(ds_json, thread_ctx)
+
             add_msg("ds", ds_json.get("ds_summary","(revised)"),
                     artifacts={"mode": "multi" if ds_json.get("action_sequence") else "single"})
             render_chat()
@@ -1175,7 +1264,7 @@ load_if_needed()
 st.subheader("Chat")
 render_chat()
 
-user_prompt = st.chat_input("You're the CEO. Ask a question (e.g., 'Cluster product dimensions', 'Explain the clusters')")
+user_prompt = st.chat_input("You're the CEO. Ask a question (e.g., 'Cluster product dimensions', 'Explain the clusters', 'Top-selling product')")
 if user_prompt:
     add_msg("user", user_prompt)
     render_chat()
