@@ -279,17 +279,15 @@ def add_msg(role, content, artifacts=None):
 
 
 def render_chat(incremental: bool = True):
-    """Render the FULL chat history every run so user messages always append.
-    The prior incremental/last_rendered_idx optimization caused confusion in the UI
-    where new messages seemed to replace old ones on rerun. Always re-render.
-    """
     msgs = st.session_state.chat
-    for m in msgs:
+    start = st.session_state.last_rendered_idx if incremental else 0
+    for m in msgs[start:]:
         with st.chat_message(m["role"]):
             st.write(m["content"])
             if m.get("artifacts"):
                 with st.expander("Artifacts", expanded=False):
                     st.json(m["artifacts"])
+    st.session_state.last_rendered_idx = len(msgs)
 
 
 def _sql_first(maybe_sql):
