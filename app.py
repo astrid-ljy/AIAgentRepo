@@ -11,37 +11,14 @@ import duckdb
 import streamlit as st
 
 
-# === DS ARTIFACT CACHE (profiles, feature props, clusters, colmaps) ===
+# === DS ARTIFACT CACHE (light) ===
 import hashlib
 
 if "ds_cache" not in st.session_state:
-    st.session_state.ds_cache = {
-        "profiles": {},      # key: table_sig -> profile dataframe (dict-serialized)
-        "featprops": {},     # key: (table_sig, task, allow_geo) -> dict
-        "clusters": {},      # key: (table_sig, tuple(features), int(k)) -> dict
-        "colmaps": {},       # key: (qhash, table_name) -> dict
-        "_order": []         # LRU order for eviction
-    }
-CACHE_MAX = 64
+    st.session_state.ds_cache = {"profiles": {}, "featprops": {}, "clusters": {}, "colmaps": {}}
 
-def _cache_put(key, value):
-    # simple LRU: key string
-    order = st.session_state.ds_cache["_order"]
-    if key in order:
-        order.remove(key)
-    order.append(key)
-    while len(order) > CACHE_MAX:
-        old = order.pop(0)
-        # delete across known stores if present
-        for store in ("profiles","featprops","clusters","colmaps"):
-            st.session_state.ds_cache[store].pop(old, None)
-    return value
-
-def table_signature(df: 'pd.DataFrame') -> str:
-    try:
-        cols_sig = hashlib.md5(("|".join(map(str, df.columns))).encode()).hexdigest()
-    except Exception:
-        cols_sig = hashlib.md5(str(list(df.columns)).encode()).hexdigest()
+def _ds_table_signature(df):
+    cols_sig = hashlib.md5(("|".join(map(str, df.columns))).encode()).hexdigest()
     sample = df.head(100)
     try:
         data_sig = hashlib.md5(pd.util.hash_pandas_object(sample, index=False).values).hexdigest()
@@ -49,54 +26,25 @@ def table_signature(df: 'pd.DataFrame') -> str:
         data_sig = hashlib.md5(sample.to_csv(index=False).encode()).hexdigest()
     return f"{cols_sig}:{data_sig}"
 
-def qhash(text: str) -> str:
-    return hashlib.md5((text or "").strip().lower().encode()).hexdigest()
-
 def cached_profile(df: 'pd.DataFrame'):
-    sig = table_signature(df)
+    sig = _ds_table_signature(df)
     store = st.session_state.ds_cache["profiles"]
     if sig in store:
-        prof = store[sig]
-        # reconstruct dataframe if serialized
-        if isinstance(prof, dict) and "__profile_df__" in prof:
-            return pd.DataFrame.from_dict(prof["__profile_df__"])
-        return prof
-    # fallback to real function
-    try:
-        prof = profile_columns(df)
-    except Exception as e:
-        # worst case: basic profile
-        prof = pd.DataFrame({"column": df.columns, "dtype": [str(df[c].dtype) for c in df.columns]})
-    val = {"__profile_df__": prof.to_dict(orient="list")}
-    store[sig] = val
-    _cache_put(sig, val)
+        return pd.DataFrame.from_dict(store[sig])
+    prof = profile_columns(df)
+    store[sig] = prof.to_dict(orient="list")
     return prof
 
 def cached_propose_features(task: str, df: 'pd.DataFrame', allow_geo: bool=False) -> dict:
-    sig = table_signature(df)
+    sig = _ds_table_signature(df)
     key = (sig, task, bool(allow_geo))
     store = st.session_state.ds_cache["featprops"]
     if key in store:
         return dict(store[key])
     prof = cached_profile(df)
-    try:
-        prop = propose_features(task, prof, allow_geo=allow_geo)
-    except Exception:
-        # naive numeric fallback
-        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        prop = {"selected_features": num_cols[:10]}
+    prop = propose_features(task, prof, allow_geo=allow_geo)
     store[key] = dict(prop)
-    _cache_put(key, prop)
     return prop
-
-def cache_colmap(question_text: str, table_name: str, colmap: dict):
-    key = (qhash(question_text), table_name)
-    st.session_state.ds_cache["colmaps"][key] = dict(colmap)
-    _cache_put(key, colmap)
-
-def get_cached_colmap(question_text: str, table_name: str):
-    key = (qhash(question_text), table_name)
-    return st.session_state.ds_cache["colmaps"].get(key)
 
 
 from sklearn.model_selection import train_test_split
@@ -534,53 +482,7 @@ def preflight(task: str, proposal: dict) -> tuple[bool, str]:
 # ======================
 DIM_PAT = re.compile(r"product_(weight_g|length_cm|height_cm|width_cm)$", re.I)
 
-def choose_model_base(
-
-# === TABLE ROLE INFERENCE & BASE SELECTION ===
-import re as _re
-
-_PRODUCT_KEYS   = _re.compile(r"\b(product|sku|item|upc|asin)\b", _re.I)
-_CUSTOMER_KEYS  = _re.compile(r"\b(customer|client|account|user)\b", _re.I)
-_PRODUCT_ATTRS  = _re.compile(r"\b(category|brand|model|family|weight|height|width|length|size|dimension|price|cost)\b", _re.I)
-
-def _infer_table_role(name: str, cols) -> str:
-    name_l = (name or "").lower()
-    cols_l = [str(c).lower() for c in cols]
-    score_p = 0
-    score_c = 0
-    if _PRODUCT_KEYS.search(name_l):  score_p += 2
-    if _CUSTOMER_KEYS.search(name_l): score_c += 2
-    if any(_PRODUCT_KEYS.search(c) for c in cols_l):  score_p += 2
-    if any(_CUSTOMER_KEYS.search(c) for c in cols_l): score_c += 2
-    if any(_PRODUCT_ATTRS.search(c) for c in cols_l): score_p += 1
-    if score_p > score_c: return "product"
-    if score_c > score_p: return "customer"
-    return "unknown"
-
-def choose_model_base(plan: dict, question_text: str) -> 'pd.DataFrame|None':
-    try:
-        tables = get_all_tables()
-    except Exception:
-        return None
-    if not tables:
-        return None
-    q = (question_text or "").lower()
-    ranked = []
-    for name, df in tables.items():
-        role = _infer_table_role(name, df.columns)
-        prof = cached_profile(df)
-        prop = cached_propose_features("clustering", df, allow_geo=False)
-        feats = prop.get("selected_features", [])
-        score = len(feats)
-        if "product" in q or "dimension" in q:
-            score += 2 if role == "product" else -1 if role == "customer" else 0
-            # boost if columns look like product attrs
-            score += sum(1 for c in df.columns if _PRODUCT_ATTRS.search(str(c))) * 0.05
-        ranked.append((score, name, df, feats))
-    ranked.sort(key=lambda t: t[0], reverse=True)
-    return ranked[0][2].copy() if ranked else None
-
-plan: dict, question_text: str) -> Optional[pd.DataFrame]:
+def choose_model_base(plan: dict, question_text: str) -> Optional[pd.DataFrame]:
     """
     Browse ALL loaded tables and pick the best single base:
     - If the question mentions product/dimension: pick the table with the MOST numeric dimension-like columns.
@@ -616,119 +518,7 @@ plan: dict, question_text: str) -> Optional[pd.DataFrame]:
 # ======================
 # Modeling (incl. clustering)
 # ======================
-def train_model(
-
-# === CLUSTERING UTILITIES ===
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-
-def _drop_const_cols(df: 'pd.DataFrame', cols):
-
-        # --- clustering caching & k-sweep ----
-        if task == "clustering":
-            use_cols = plan.get("features") or []
-            if not use_cols:
-                # seed from propose_features
-                prop = cached_propose_features("clustering", base_df if 'base_df' in locals() else df, allow_geo=False)
-                use_cols = prop.get("selected_features", [])
-            use_cols = [c for c in use_cols if c in (base_df.columns if 'base_df' in locals() else df.columns)]
-            # optional: include low-cardinality categoricals if we have <2 numeric features
-            if len([c for c in use_cols if pd.api.types.is_numeric_dtype((base_df if 'base_df' in locals() else df)[c])]) < 2:
-                candidate_cats = []
-                for c in (base_df.columns if 'base_df' in locals() else df.columns):
-                    s = (base_df if 'base_df' in locals() else df)[c]
-                    if pd.api.types.is_object_dtype(s) or pd.api.types.is_categorical_dtype(s):
-                        nun = s.nunique(dropna=True)
-                        if 2 <= nun <= 30:
-                            candidate_cats.append(c)
-                if candidate_cats:
-                    # one-hot limited set
-                    tmp = (base_df if 'base_df' in locals() else df)[candidate_cats].astype('category')
-                    oh = pd.get_dummies(tmp, dummy_na=False)
-                    # join with numeric
-                    num_cols = [c for c in (base_df.columns if 'base_df' in locals() else df.columns) if pd.api.types.is_numeric_dtype((base_df if 'base_df' in locals() else df)[c])]
-                    dat = pd.concat([(base_df if 'base_df' in locals() else df)[num_cols], oh], axis=1)
-                else:
-                    dat = (base_df if 'base_df' in locals() else df)[use_cols]
-            else:
-                dat = (base_df if 'base_df' in locals() else df)[use_cols]
-            dat = dat.dropna()
-            if dat.shape[0] < 10 or dat.shape[1] < 2:
-                return {"error": "Not enough data for clustering after filtering", "rows": int(dat.shape[0]), "cols": int(dat.shape[1])}
-            # cap rows for heavy ops
-            if dat.shape[0] > 50000:
-                dat = dat.sample(50000, random_state=42)
-            # drop constant columns
-            use_cols2 = _drop_const_cols(dat, list(dat.columns))
-            dat = dat[use_cols2]
-            scaler = StandardScaler().fit(dat)
-            Xs = scaler.transform(dat)
-            # check cache first
-            t_sig = table_signature((base_df if 'base_df' in locals() else df))
-            k = int(plan.get("n_clusters", 5))
-            ckey = (t_sig, tuple(use_cols2), k)
-            clu_store = st.session_state.ds_cache["clusters"]
-            if ckey in clu_store:
-                return {**clu_store[ckey], "cached": True}
-            # initial k run
-            km = KMeans(n_clusters=k, n_init=10, random_state=42)
-            labels = km.fit_predict(Xs)
-            try:
-                sil = float(silhouette_score(Xs, labels))
-            except Exception:
-                sil = -1.0
-            # if poor quality, sweep k
-            if sil < 0.2:
-                best, labels_best = _k_sweep(Xs, [2,3,4,5,6,7,8])
-                if best["k"] is not None and best["sil"] > sil:
-                    k = best["k"]
-                    km = best["km"]
-                    labels = labels_best
-                    sil = best["sil"]
-            sizes = pd.Series(labels).value_counts().to_dict()
-            centroids_df = pd.DataFrame(km.cluster_centers_, columns=list(dat.columns))
-            result = {
-                "task": "clustering",
-                "features": list(dat.columns),
-                "n_clusters": int(k),
-                "cluster_sizes": {int(k_): int(v) for k_, v in sizes.items()},
-                "centroids": centroids_df.to_dict(orient="list"),
-                "silhouette": float(sil),
-            }
-            clu_store[ckey] = dict(result)
-            _cache_put(ckey, result)
-            return result
-
-    keep = []
-    for c in cols:
-        s = df[c]
-        try:
-            if s.nunique(dropna=True) > 1:
-                keep.append(c)
-        except Exception:
-            continue
-    return keep
-
-def _k_sweep(Xs, k_list):
-    best = {"k": None, "sil": -1.0}
-    labels_best = None
-    for k in k_list:
-        try:
-            km = KMeans(n_clusters=int(k), n_init=10, random_state=42)
-            lab = km.fit_predict(Xs)
-            try:
-                sil = float(silhouette_score(Xs, lab))
-            except Exception:
-                sil = -1.0
-            if sil > best["sil"]:
-                best = {"k": int(k), "sil": sil, "km": km}
-                labels_best = lab
-        except Exception:
-            continue
-    return best, labels_best
-
-df: pd.DataFrame, task: str, target: Optional[str], features: List[str], family: str, n_clusters: Optional[int]=None) -> Dict[str, Any]:
+def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: List[str], family: str, n_clusters: Optional[int]=None) -> Dict[str, Any]:
     if task == "clustering":
         # Prefer explicit dimension columns if present
         dim_like = [c for c in df.columns if DIM_PAT.search(str(c))]
@@ -742,14 +532,7 @@ df: pd.DataFrame, task: str, target: Optional[str], features: List[str], family:
                 ok, msg = preflight("clustering", prop)
                 if not ok:
                     return {"error": msg, "feature_proposal": prop}
-                
-    # Modified: instead of stopping, request FE then auto-progress
-    return {
-        \"ds_summary\": f\"Preflight failed: {msg}. I will run feature engineering next and then proceed to clustering.\",
-        \"action\": \"feature_engineering\",
-        \"need_more_info\": False
-    }
-use_cols = prop["selected_features"]
+                use_cols = prop["selected_features"]
             else:
                 use_cols = [c for c in features if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
                 if len(use_cols) < 2:
@@ -758,14 +541,7 @@ use_cols = prop["selected_features"]
                     ok, msg = preflight("clustering", prop)
                     if not ok:
                         return {"error": msg, "feature_proposal": prop}
-                    
-    # Modified: instead of stopping, request FE then auto-progress
-    return {
-        \"ds_summary\": f\"Preflight failed: {msg}. I will run feature engineering next and then proceed to clustering.\",
-        \"action\": \"feature_engineering\",
-        \"need_more_info\": False
-    }
-use_cols = prop["selected_features"]
+                    use_cols = prop["selected_features"]
 
         X = df[use_cols].copy()
         scaler = StandardScaler()
@@ -1262,17 +1038,10 @@ def render_final_for_action(ds_step: dict):
 # ======================
 # Coordinator (threading + arbitration + follow-ups)
 # ======================
-def run_turn_ceo(
+def run_turn_ceo(new_text: str):
 
-# === PROGRESS GUARD: ensure we don't stall at EDA/FE when clustering is requested ===
-def must_progress_to_modeling(thread_ctx: dict, am_json: dict, ds_json: dict) -> bool:
-    q = (thread_ctx.get("current_question") or thread_ctx.get("central_question") or "").lower()
-    wants_cluster = ("cluster" in q) or str(am_json.get("model_plan",{}).get("task","")).lower()=="clustering"
-    ds_action = (ds_json.get("action") or "").lower()
-    # treat EDA/FE/SQL as intermediate; do not stop there when clustering intent exists
-    return wants_cluster and ds_action in {"overview","eda","feature_engineering","sql"}
 
-new_text: str):
+
     prev = st.session_state.current_question or ""
     central = st.session_state.central_question or ""
     prior = st.session_state.prior_questions or []
@@ -1335,16 +1104,9 @@ new_text: str):
     ds_json = run_ds_step(am_json, col_hints, thread_ctx)
 
     
-
-    # Auto-advance to modeling if we shouldn't stall at EDA/FE
-    try:
-        if must_progress_to_modeling(thread_ctx, am_json, ds_json):
-            am_json = {**am_json, "task_mode":"single", "next_action_type":"modeling",
-                       "plan_for_ds": (am_json.get("plan_for_ds") or "") + " | Proceed to clustering."}
-            ds_json = run_ds_step(am_json, column_hints, thread_ctx)
-    except Exception as _e:
-        st.debug(f"progress_guard error: {_e}")
-
+    if must_progress_to_modeling(thread_ctx, am_json, ds_json):
+        am_json = {**am_json, "task_mode":"single", "next_action_type":"modeling", "plan_for_ds": (am_json.get("plan_for_ds") or "") + " | Proceed to clustering."}
+        ds_json = run_ds_step(am_json, column_hints, thread_ctx)
 # If DS asks for clarification explicitly
     if ds_json.get("need_more_info") and (ds_json.get("clarifying_questions") or []):
         add_msg("ds", "Before running further steps, I need:")
