@@ -42,10 +42,12 @@ You are the Analytics Manager (AM). Plan how to answer the CEO’s business ques
 
 **Action classification:** Prefer deciding the **granularity** of work first:
 - task_mode: "single" or "multi" (is it a one-step task or does it need several DS steps?)
-- If task_mode="single" → choose exactly one next_action_type for DS from: `overview`, `sql`, `eda`, `calc`, `feature_engineering`, `modeling`.
+- If task_mode="single" → choose exactly one next_action_type for DS from: `overview`, `sql`, `eda`, `calc`, `feature_engineering`, `modeling`, `explain`.
 - If task_mode="multi" → propose a short `action_sequence` (2–5 steps) using ONLY those allowed actions.
 
 **Special rule — Data Inventory:** If the CEO asks variations of “what data do we have,” set next_action_type="overview" only and instruct DS to output **first 5 rows for each table**. No EDA/FE/modeling.
+
+**Follow-up rule:** If the CEO’s message is a follow-up asking to *explain*, *interpret*, *summarize*, *what features did you use*, or *what changed*, choose the single action **`explain`** and DO NOT rerun modeling/EDA/SQL. Use the latest cached results instead; treat the central question as context only.
 
 Use the provided `column_hints` to resolve business terms (e.g., revenue → sales) strictly to existing columns.
 
@@ -56,7 +58,7 @@ Output JSON fields:
 - plan_for_ds: concrete steps referencing ONLY existing tables/columns.
 - goal: profit proxy to improve (revenue ↑, cost ↓, margin ↑).
 - task_mode: single|multi
-- next_action_type: overview|sql|eda|calc|feature_engineering|modeling|null
+- next_action_type: overview|sql|eda|calc|feature_engineering|modeling|explain|null
 - action_sequence: [ {action: one of allowed, note: short} ]  # if task_mode=multi
 - action_reason: short rationale of why this action or sequence is appropriate
 - notes_to_ceo: 1–2 short notes
@@ -74,20 +76,22 @@ Use that history to understand whether the user is giving feedback/follow-up, an
 
 **Execution modes:**
 - If AM provided `am_action_sequence`, you may return a matching `action_sequence` (2–5 steps). Otherwise, return a single `action` that MUST match `am_next_action_type`.
-- For each step/action, follow the allowed set exactly: overview, sql, eda, calc, feature_engineering, modeling.
+- For each step/action, follow the allowed set exactly: overview, sql, eda, calc, feature_engineering, modeling, explain.
 - If a different approach is objectively better, explain briefly in ds_summary, but still conform to the AM’s action(s).
 
 **Special rule — Data Inventory:** If AM indicates overview OR the CEO asked “what data do we have,” your action MUST be "overview" and your output should be previews of the **first 5 rows for each table**.
+
+**Follow-up rule:** If `action=explain`, DO NOT recompute. Interpret the latest cached result from the most relevant prior step (prefer modeling→clustering > modeling→supervised > eda > feature_engineering > sql). If nothing cached yet, ask for permission to run the missing step.
 
 Support clustering by setting model_plan.task="clustering" (with optional n_clusters) when a step uses `modeling`.
 
 You may ask the CEO clarifying questions if needed before executing risky or ambiguous steps.
 
 Return JSON fields:
-- ds_summary: brief note of intended execution aligned to the central question
+- ds_summary: brief note of intended execution aligned to the follow-up request (not rerunning)
 - need_more_info: true|false
 - clarifying_questions: []
-- action: overview|sql|eda|calc|feature_engineering|modeling|null  # present if single-step
+- action: overview|sql|eda|calc|feature_engineering|modeling|explain|null  # present if single-step
 - action_sequence: [  # present if multi-step
     { action: one_of_allowed, duckdb_sql: str|[str]|null, charts: [ {title,type,x,y} ]|[[...]], model_plan: {...}|null, calc_description: str|nil }
   ]
@@ -128,13 +132,6 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 SYSTEM_REVIEW = """
 You are a Coordinator. Produce a concise revision directive for AM & DS when CEO gives feedback.
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
-"""
-
-SYSTEM_COLMAP = """
-You are a column mapper. Given {tables} (table -> columns) and a business question,
-suggest likely columns for common business terms and up to 10 suggested features.
-Return JSON: { "term_to_columns": {term: [{"table": "...","column":"..."}]}, "suggested_features":[{"table":"...","column":"..."}], "notes": "..." }
-Return ONLY a single JSON object (json).
 """
 
 SYSTEM_INTENT = """
@@ -183,6 +180,15 @@ if "current_question" not in st.session_state: st.session_state.current_question
 if "threads" not in st.session_state: st.session_state.threads = []  # [{central, followups: []}]
 if "central_question" not in st.session_state: st.session_state.central_question = ""
 if "prior_questions" not in st.session_state: st.session_state.prior_questions = []
+# Caches for last results of each action
+if "last_results" not in st.session_state:
+    st.session_state.last_results = {
+        "sql": None,
+        "eda": None,
+        "feature_engineering": None,
+        "modeling": None,          # includes supervised reports
+        "clustering": None,        # specialized view for clustering
+    }
 
 # Lightweight business term synonyms (heuristic fallback used before LLM col-map)
 TERM_SYNONYMS: Dict[str, List[str]] = {
@@ -343,7 +349,7 @@ def classify_intent(previous_question: str, central_question: str, prior_questio
         pass
     # Fallback heuristic
     low = (new_text or "").lower()
-    if any(w in low for w in ["that", "this", "looks", "seems", "instead", "also", "why", "how about", "can you"]):
+    if any(w in low for w in ["that", "this", "looks", "seems", "instead", "also", "why", "how about", "can you", "explain", "interpret"]):
         return {"intent": "feedback", "related": True}
     return {"intent": "new_request", "related": False}
 
@@ -388,6 +394,15 @@ def build_column_hints(question: str) -> dict:
     hints["suggested_features"] = uniq[:20]
     return hints
 
+def is_interpretation_followup(text: str) -> bool:
+    q = (text or "").lower()
+    triggers = [
+        "interpret", "explain", "explanation", "how to read", "how do i read",
+        "what features", "which features", "feature used", "feature set",
+        "summarize results", "what changed", "help me understand", "diagnose"
+    ]
+    return any(t in q for t in triggers)
+
 # ======================
 # Modeling (incl. clustering)
 # ======================
@@ -421,6 +436,14 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
             coords_df = pd.DataFrame({"pc1": coords[:,0], "pc2": coords[:,1], "cluster": labels})
         except Exception:
             coords_df = None
+        # Centroids back in original units
+        try:
+            centers_std = kmeans.cluster_centers_
+            centers_orig = scaler.inverse_transform(centers_std)
+            centroids_df = pd.DataFrame(centers_orig, columns=use_cols)
+        except Exception:
+            centroids_df = None
+
         sizes = pd.Series(labels).value_counts().sort_index().to_dict()
         report.update({
             "task": "clustering",
@@ -430,7 +453,7 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
             "inertia": float(getattr(kmeans, "inertia_", np.nan)),
             "silhouette": sil,
         })
-        return {"report": report, "labels": labels.tolist(), "pca": coords_df}
+        return {"report": report, "labels": labels.tolist(), "pca": coords_df, "centroids": centroids_df}
 
     # ---- Supervised ----
     if target is None or target not in df.columns:
@@ -514,12 +537,14 @@ def run_am_plan(prompt: str, column_hints: dict, context: dict) -> dict:
 
 
 def _coerce_allowed(action: str, fallback: str) -> str:
-    allowed = {"overview","sql","eda","calc","feature_engineering","modeling"}
+    allowed = {"overview","sql","eda","calc","feature_engineering","modeling","explain"}
     a = (action or "").lower()
     if a in allowed: return a
     synonym_map = {
         "aggregate": "sql", "aggregate_sales": "sql", "aggregation": "sql",
-        "summarize": "sql", "preview": "overview", "analyze": "eda",
+        "summarize": "explain", "explanation": "explain", "interpret": "explain",
+        "report": "explain", "what features": "explain",
+        "preview": "overview", "analyze": "eda",
     }
     return synonym_map.get(a, fallback if fallback in allowed else "eda")
 
@@ -595,129 +620,6 @@ def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict, column_hints
 
 
 # ======================
-# DS output normalization & clustering auto-promotion
-# ======================
-
-def _first_existing_table_with(cols_required: List[str]) -> Optional[str]:
-    """Return the first table name containing ALL required columns; else the first table that contains ANY."""
-    tables = get_all_tables()
-    # prefer ALL
-    for name, df in tables.items():
-        if all(c in df.columns for c in cols_required):
-            return name
-    # fallback ANY
-    for name, df in tables.items():
-        if any(c in df.columns for c in cols_required):
-            return name
-    return None
-
-
-def normalize_ds_output(ds_json: dict, am_json: dict) -> dict:
-    """
-    Ensure DS output is executable:
-    - If missing both 'action' and 'action_sequence', synthesize from AM's intent.
-    - If single-step but missing fields, fill sensible defaults.
-    - If modeling step is clustering but features missing, fall back to all numeric cols.
-    """
-    if not isinstance(ds_json, dict):
-        ds_json = {}
-
-    # If there's a valid sequence, sanitize and keep
-    if ds_json.get("action_sequence"):
-        for step in ds_json["action_sequence"]:
-            step["action"] = _coerce_allowed(step.get("action"), am_json.get("next_action_type") or "eda")
-        return ds_json
-
-    # If single-step missing, synthesize from AM
-    action = (ds_json.get("action") or "").strip().lower()
-    if not action:
-        action = _coerce_allowed(am_json.get("next_action_type"), "eda")
-        ds_json["action"] = action
-
-    # Fill defaults by action
-    if action in {"sql", "eda", "feature_engineering", "modeling"} and not ds_json.get("duckdb_sql"):
-        # Try to pick a sensible table/columns
-        req_cols = ["product_weight_g", "product_length_cm", "product_height_cm", "product_width_cm"]
-        tname = _first_existing_table_with(req_cols) or next(iter(get_all_tables().keys()), None)
-        if tname:
-            # Olist known misspellings
-            maybe_name_len  = "product_name_lenght"
-            maybe_desc_len  = "product_description_lenght"
-            sel_cols = [c for c in ["product_id", *req_cols, "product_photos_qty", maybe_name_len, maybe_desc_len] if c in get_all_tables()[tname].columns]
-            if not sel_cols:
-                sel_cols = list(get_all_tables()[tname].columns)[:8]
-            ds_json["duckdb_sql"] = f"SELECT {', '.join(sel_cols)} FROM {tname}"
-
-    if action == "modeling":
-        # ensure model_plan exists
-        plan = ds_json.get("model_plan") or {}
-        plan.setdefault("task", "clustering")
-        plan.setdefault("n_clusters", 3)
-        # features fallback: numeric columns from the selected SQL table (if possible)
-        try:
-            sql = _sql_first(ds_json.get("duckdb_sql"))
-            base = run_duckdb_sql(sql) if sql else next(iter(get_all_tables().values()))
-            if plan.get("task") == "clustering":
-                proposed = plan.get("features") or []
-                valid = [c for c in proposed if c in base.columns and pd.api.types.is_numeric_dtype(base[c])]
-                if not valid:
-                    valid = [c for c in base.columns if pd.api.types.is_numeric_dtype(base[c])]
-                plan["features"] = valid[:20]
-        except Exception:
-            pass
-        ds_json["model_plan"] = plan
-
-    return ds_json
-
-
-def promote_to_clustering_sequence(am_json: dict, effective_q: str) -> dict:
-    """
-    If the CEO asked for clustering and AM chose single-step, promote to a 3-step sequence:
-    1) feature_engineering → select core dimension features
-    2) eda → quick distribution peek
-    3) modeling → clustering with k=3
-    """
-    text = (effective_q or "").lower()
-    if "cluster" not in text and "clustering" not in text:
-        return am_json
-
-    if (am_json.get("task_mode") or "single") == "multi" and am_json.get("action_sequence"):
-        return am_json  # already multi
-
-    # pick a products-like table
-    req_cols = ["product_weight_g", "product_length_cm", "product_height_cm", "product_width_cm"]
-    tname = _first_existing_table_with(req_cols) or next(iter(get_all_tables().keys()), None)
-    fe_sql = None
-    if tname:
-        maybe_name_len = "product_name_lenght"
-        maybe_desc_len = "product_description_lenght"
-        cols = [c for c in ["product_id", *req_cols, "product_photos_qty", maybe_name_len, maybe_desc_len] if c in get_all_tables()[tname].columns]
-        fe_sql = f"SELECT {', '.join(cols)} FROM {tname}"
-
-    eda_sqls = []
-    if tname and all(c in get_all_tables()[tname].columns for c in req_cols):
-        eda_sqls = [
-            f"SELECT product_length_cm, product_width_cm FROM {tname} WHERE product_length_cm IS NOT NULL AND product_width_cm IS NOT NULL LIMIT 1000",
-            f"SELECT product_height_cm, product_weight_g FROM {tname} WHERE product_height_cm IS NOT NULL AND product_weight_g IS NOT NULL LIMIT 1000",
-        ]
-
-    am_json["task_mode"] = "multi"
-    am_json["next_action_type"] = None
-    am_json["action_sequence"] = [
-        {"action": "feature_engineering", "duckdb_sql": fe_sql or am_json.get("duckdb_sql")},
-        {"action": "eda", "duckdb_sql": eda_sqls or am_json.get("duckdb_sql")},
-        {"action": "modeling", "model_plan": {
-            "task": "clustering",
-            "features": req_cols,   # DS will re-validate
-            "model_family": None,
-            "n_clusters": 3
-        }}
-    ]
-    am_json["action_reason"] = "Clustering requests benefit from FE→EDA→Clustering."
-    return am_json
-
-
-# ======================
 # Build meta for AM review (supports sequence)
 # ======================
 
@@ -784,6 +686,24 @@ def build_meta_for_action(ds_step: dict) -> dict:
         except Exception as e:
             return {"type": "modeling", "error": str(e)}
 
+    if action == "explain":
+        # Build meta from cached latest results
+        cache = st.session_state.last_results
+        if not any(cache.values()):
+            return {"type": "explain", "error": "no_cache"}
+        meta = {"type": "explain"}
+        if cache.get("clustering"):
+            meta["clustering"] = {k: cache["clustering"].get(k) for k in ["features","n_clusters","silhouette","cluster_sizes"]}
+        if cache.get("modeling"):
+            meta["modeling"] = {k: cache["modeling"].get(k) for k in ["task","target","features","metrics"]}
+        if cache.get("eda"):
+            meta["eda"] = {"sqls": cache["eda"].get("sqls"), "sample_cols": cache["eda"].get("sample_cols")}
+        if cache.get("feature_engineering"):
+            meta["feature_engineering"] = {"rows": cache["feature_engineering"].get("rows"), "cols": cache["feature_engineering"].get("cols")}
+        if cache.get("sql"):
+            meta["sql"] = {"sql": cache["sql"].get("sql"), "rows": cache["sql"].get("rows")}
+        return meta
+
     return {"type": action or "unknown", "note": "no meta builder"}
 
 
@@ -804,10 +724,14 @@ def render_final_for_action(ds_step: dict):
         raw_sql = ds_step.get("duckdb_sql")
         sql_list = raw_sql if isinstance(raw_sql, list) else [raw_sql]
         charts_all = ds_step.get("charts") or []
+        executed_sqls = []
+        last_cols = None
         for i, sql in enumerate([_sql_first(s) for s in sql_list][:3]):
             if not sql: continue
             try:
                 df = run_duckdb_sql(sql)
+                executed_sqls.append(sql)
+                last_cols = list(df.columns)
                 st.markdown(f"### 📈 EDA Result #{i+1} (first 50 rows)")
                 st.code(sql, language="sql")
                 st.dataframe(df.head(50), width="stretch")
@@ -829,6 +753,8 @@ def render_final_for_action(ds_step: dict):
                         else: st.bar_chart(plot_df)
             except Exception as e:
                 st.error(f"EDA SQL failed: {e}")
+        # cache
+        st.session_state.last_results["eda"] = {"sqls": executed_sqls, "sample_cols": last_cols}
         add_msg("ds","EDA rendered.")
         return
 
@@ -844,6 +770,8 @@ def render_final_for_action(ds_step: dict):
             st.code(sql, language="sql")
             st.dataframe(out.head(25), width="stretch")
             add_msg("ds","SQL executed.", artifacts={"sql": sql})
+            # cache
+            st.session_state.last_results["sql"] = {"sql": sql, "rows": len(out), "cols": list(out.columns)}
         except Exception as e:
             st.error(f"SQL failed: {e}")
         return
@@ -863,6 +791,8 @@ def render_final_for_action(ds_step: dict):
         st.dataframe(base.head(20), width="stretch")
         # snapshot FE table for downstream reference
         st.session_state.tables_fe["feature_base"] = base
+        # cache
+        st.session_state.last_results["feature_engineering"] = {"rows": len(base), "cols": list(base.columns)}
         add_msg("ds","Feature base ready (saved as 'feature_base').")
         return
 
@@ -890,13 +820,94 @@ def render_final_for_action(ds_step: dict):
                 st.markdown("**PCA Scatter (by cluster)**")
                 st.dataframe(pca_df.head(200))
             add_msg("ds","Clustering completed.", artifacts={"report": rep})
+            # cache specialized clustering
+            st.session_state.last_results["clustering"] = {
+                "report": rep,
+                "features": list(rep.get("features") or []),
+                "n_clusters": int(rep.get("n_clusters") or 0),
+                "cluster_sizes": rep.get("cluster_sizes") or {},
+                "silhouette": rep.get("silhouette"),
+                "centroids": (result.get("centroids").to_dict(orient="records") if isinstance(result.get("centroids"), pd.DataFrame) else None)
+            }
+            # generic modeling cache
+            st.session_state.last_results["modeling"] = {
+                "task": "clustering",
+                "features": list(rep.get("features") or []),
+                "metrics": {"silhouette": rep.get("silhouette"), "inertia": rep.get("inertia")},
+                "target": None
+            }
             return
         else:
             report = train_model(base, task, target, plan.get("features") or [], (plan.get("model_family") or "logistic_regression").lower())
             st.markdown("### 🤖 Model Report")
             st.json(report)
             add_msg("ds","Model trained.", artifacts={"model_report": report})
+            # cache modeling
+            st.session_state.last_results["modeling"] = {
+                "task": task, "target": target, "features": report.get("features"),
+                "metrics": {k: report.get(k) for k in ["accuracy","roc_auc","mae","rmse","r2"] if k in report}
+            }
             return
+
+    # ---- EXPLAIN (no recompute; read from caches) ----
+    if action == "explain":
+        cache = st.session_state.last_results
+        if not any(cache.values()):
+            add_msg("ds", "I don’t have cached results yet. Please run a step (EDA/FE/Modeling) first.")
+            st.info("No cached results found. Run an analysis first, then ask for interpretation.")
+            return
+
+        st.markdown("### 📝 Interpretation of Latest Results")
+
+        # Priority: clustering > modeling (supervised) > eda > feature_engineering > sql
+        if cache.get("clustering"):
+            ctx = cache["clustering"]
+            st.markdown("#### Clustering")
+            st.markdown("**Features used:** " + (", ".join(ctx.get("features") or []) or "_not recorded_"))
+            st.markdown(f"**k (clusters):** {ctx.get('n_clusters')}")
+            st.markdown(f"**Silhouette:** {ctx.get('silhouette')}")
+            st.markdown("**Cluster sizes:**")
+            st.json(ctx.get("cluster_sizes") or {})
+            if ctx.get("centroids"):
+                st.markdown("**Centroids (original units):**")
+                st.dataframe(pd.DataFrame(ctx["centroids"]))
+                # quick heuristic naming
+                try:
+                    cdf = pd.DataFrame(ctx["centroids"])
+                    bullets = []
+                    for i, row in cdf.iterrows():
+                        top = row.sort_values(ascending=False).head(min(3, len(row))).index.tolist()
+                        bullets.append(f"- Cluster {i}: high on {', '.join(top)}")
+                    st.markdown("**Heuristic labels:**")
+                    for b in bullets: st.write(b)
+                except Exception:
+                    pass
+            st.markdown("**What to do next:** Join clusters back to sales/margin/shipping to target pricing & ops.")
+        elif cache.get("modeling"):
+            m = cache["modeling"]
+            st.markdown("#### Modeling")
+            st.json(m)
+            st.markdown("**Interpretation:** Features above were used; metrics summarize generalization. Inspect top drivers (feature importances or coefficients) next if needed.")
+        elif cache.get("eda"):
+            e = cache["eda"]
+            st.markdown("#### EDA")
+            st.write("Recent EDA queries:")
+            for s in (e.get("sqls") or [])[:5]:
+                st.code(s, language="sql")
+            st.write("Sample columns observed:", e.get("sample_cols"))
+            st.markdown("**Interpretation:** Use EDA patterns to guide feature engineering and model choice; beware outliers and missingness.")
+        elif cache.get("feature_engineering"):
+            fe = cache["feature_engineering"]
+            st.markdown("#### Feature Engineering")
+            st.json(fe)
+            st.markdown("**Interpretation:** This snapshot defines the feature space that downstream models/EDA used.")
+        elif cache.get("sql"):
+            sq = cache["sql"]
+            st.markdown("#### SQL result context")
+            st.json(sq)
+            st.markdown("**Interpretation:** The SQL result was used as a basis for subsequent analysis.")
+        add_msg("ds", "Provided interpretation without re-running any steps.", artifacts={"explain_used": True})
+        return
 
     add_msg("ds", f"Action '{action}' not recognized.", artifacts=ds_step)
 
@@ -956,9 +967,16 @@ def run_turn_ceo(new_text: str):
         "prior_questions": st.session_state.prior_questions,
     }
 
-    # 1) AM plan (with inventory short-circuit in prompts but still reviewed)
+    # 1) AM plan
     am_json = run_am_plan(effective_q, col_hints, context=thread_ctx)
-    am_json = promote_to_clustering_sequence(am_json, effective_q)
+
+    # If follow-up asks for interpretation, force single-step 'explain' and do not recompute
+    if is_interpretation_followup(new_text) or (intent in {"feedback","answers_to_clarifying"} and is_interpretation_followup(st.session_state.current_question)):
+        am_json["task_mode"] = "single"
+        am_json["next_action_type"] = "explain"
+        am_json["action_sequence"] = []
+        am_json["action_reason"] = "Follow-up interpretation requested; explaining cached results without re-running."
+        am_json["plan_for_ds"] = "Explain latest results: if clustering exists, report features, k, silhouette, sizes, centroids; otherwise explain last modeling/EDA/FE/SQL."
 
     # If AM needs user info, ask and stop until the CEO replies
     if am_json.get("need_more_info"):
@@ -973,7 +991,10 @@ def run_turn_ceo(new_text: str):
     max_loops = 3
     loop_count = 0
     ds_json = run_ds_step(am_json, col_hints, thread_ctx)
-    ds_json = normalize_ds_output(ds_json, am_json)
+
+    # Enforce explain if AM asked for it but DS returned nothing actionable
+    if am_json.get("next_action_type") == "explain" and not (ds_json.get("action") or ds_json.get("action_sequence")):
+        ds_json["action"] = "explain"
 
     # If DS asks for clarification explicitly
     if ds_json.get("need_more_info") and (ds_json.get("clarifying_questions") or []):
@@ -984,7 +1005,7 @@ def run_turn_ceo(new_text: str):
         return
 
     # Build metas (sequence-aware)
-    def _build_metas(ds_json_local: dict) -> Union[dict, List[dict]]:
+    def build_meta_wrapper(ds_json_local: dict) -> Union[dict, List[dict]]:
         if ds_json_local.get("action_sequence"):
             metas = []
             for step in ds_json_local.get("action_sequence")[:5]:
@@ -1019,7 +1040,7 @@ def run_turn_ceo(new_text: str):
     while loop_count < max_loops:
         loop_count += 1
 
-        meta = _build_metas(ds_json)
+        meta = build_meta_wrapper(ds_json)
         review = am_review(effective_q, ds_json, {"meta": meta, "mode": "multi" if ds_json.get("action_sequence") else "single"})
         add_msg("am", review.get("summary_for_ceo",""), artifacts={
             "appropriateness_check": review.get("appropriateness_check"),
@@ -1044,21 +1065,18 @@ def run_turn_ceo(new_text: str):
             _render(ds_json)
             return
 
-        # Otherwise revise if requested
+        # Otherwise revise if requested (or try a targeted refinement)
         if review.get("must_revise"):
             ds_json = revise_ds(am_json, ds_json, review, col_hints, thread_ctx)
-            ds_json = normalize_ds_output(ds_json, am_json)
             add_msg("ds", ds_json.get("ds_summary","(revised)"), artifacts={"mode": "multi" if ds_json.get("action_sequence") else "single"})
             render_chat()
             continue
         else:
-            # Not sufficient but also not explicitly must_revise → attempt a targeted refinement
             review_fallback = {
                 "appropriateness_check": "Not sufficient; attempt targeted refinement.",
-                "revision_notes": "Tighten alignment to the central question, follow column_hints strictly, and ensure actions are from the allowed set.",
+                "revision_notes": "Tighten alignment to the follow-up; do not rerun previous steps; use caches; ensure actions are from the allowed set.",
             }
             ds_json = revise_ds(am_json, ds_json, review_fallback, col_hints, thread_ctx)
-            ds_json = normalize_ds_output(ds_json, am_json)
             add_msg("ds", ds_json.get("ds_summary","(auto-revised)"), artifacts={"mode": "multi" if ds_json.get("action_sequence") else "single"})
             render_chat()
             continue
@@ -1072,12 +1090,14 @@ def run_turn_ceo(new_text: str):
 # ======================
 # Data loading
 # ======================
-if zip_file and st.session_state.tables_raw is None:
-    st.session_state.tables_raw = load_zip_tables(zip_file)
-    st.session_state.tables = get_all_tables()
-    add_msg("system", f"Loaded {len(st.session_state.tables_raw)} raw tables.")
-    render_chat()
+def load_if_needed():
+    if zip_file and st.session_state.tables_raw is None:
+        st.session_state.tables_raw = load_zip_tables(zip_file)
+        st.session_state.tables = get_all_tables()
+        add_msg("system", f"Loaded {len(st.session_state.tables_raw)} raw tables.")
+        render_chat()
 
+load_if_needed()
 
 # ======================
 # Chat UI
