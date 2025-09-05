@@ -16,6 +16,24 @@ import pandas as pd
 import duckdb
 import streamlit as st
 
+# ---- Session-state defaults guard ----
+def _ensure_state_defaults():
+    ss = st.session_state
+    # core chat/threading
+    if "chat" not in ss: ss["chat"] = []
+    if "threads" not in ss: ss["threads"] = []
+    if "active_thread_idx" not in ss: ss["active_thread_idx"] = 0
+    if "last_rendered_idx" not in ss: ss["last_rendered_idx"] = 0
+    # user question tracking
+    if "current_question" not in ss: ss["current_question"] = ""
+    if "user_question_history" not in ss: ss["user_question_history"] = []
+    # data tables
+    if "tables_raw" not in ss: ss["tables_raw"] = {}
+    if "tables" not in ss: ss["tables"] = {}
+    if "tables_fe" not in ss: ss["tables_fe"] = {}
+    # modeling cache
+    if "last_model_result" not in ss: ss["last_model_result"] = None
+
 from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -1267,6 +1285,7 @@ def _append_followup(text: str):
         st.session_state.threads[idx]["followups"].append(text)
 
 def run_turn_ceo(new_text: str):
+    _ensure_state_defaults()
     prev = st.session_state.current_question or ""
     intent = classify_intent(prev, new_text)
     st.session_state.user_question_history.append(new_text)
@@ -1346,6 +1365,7 @@ if zip_file and st.session_state.tables_raw is None:
 # Chat UI (history preserved)
 # ======================
 st.subheader("Chat")
+_ensure_state_defaults()
 render_chat()
 
 user_prompt = st.chat_input("You're the CEO. Ask a question (e.g., 'What data do we have?' or 'Run review analysis with aggregate_reviews_from_text')")
