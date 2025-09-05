@@ -52,7 +52,7 @@ You are the Analytics Manager (AM). Plan how to answer the CEO’s business ques
 
 Use provided `column_hints` to resolve business terms strictly to existing columns.
 
-You can see the CEO's **current question**, the **central question of the active thread**, and **all prior questions**. Use this to decide new vs follow-up and to keep follow-ups anchored to the central question.
+You can see the CEO's **current question**, the **central question of the active thread**, and **all prior questions**.
 
 Output JSON fields:
 - am_brief
@@ -190,11 +190,11 @@ if "last_results" not in st.session_state:
         "sql": None,
         "eda": None,
         "feature_engineering": None,
-        "modeling": None,      # generic supervised model summary
+        "modeling": None,      # supervised model summary
         "clustering": None,    # clustering specifics
     }
 
-# Lightweight business term synonyms (heuristic fallback used before LLM col-map)
+# Lightweight business term synonyms (heuristic fallback)
 TERM_SYNONYMS: Dict[str, List[str]] = {
     "revenue": ["revenue", "sales", "sales_amount", "net_sales", "turnover", "gmv", "amount"],
     "profit": ["profit", "net_income", "margin", "gross_profit", "operating_income"],
@@ -333,6 +333,11 @@ def is_data_inventory_question(text: str) -> bool:
     return any(t in q for t in triggers)
 
 
+def _explicit_new_thread(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(re.search(r"\bnot (a|an)?\s*follow[- ]?up\b", t))
+
+
 def classify_intent(previous_question: str, central_question: str, prior_questions: List[str], new_text: str) -> dict:
     """LLM-based intent classification with graceful fallback and relatedness."""
     try:
@@ -369,16 +374,6 @@ def extract_desired_action(text: str) -> dict:
     if re.search(r"\bfeature engineer(ing)?\b|\bfeatur(e|es)\b", t):
         return {"next_action_type": "feature_engineering"}
     return {}
-
-
-def _explicit_new_thread(text: str) -> bool:
-    t = (text or "").lower()
-    if re.search(r"\bnot (a|an)?\s*follow[- ]?up\b", t):
-        return True
-    # strong action keywords may indicate a new central ask
-    strong_cluster = re.search(r"\bcluster(ing)?\b", t)
-    strong_model   = re.search(r"\bmodel(ing)?\b", t)
-    return bool(strong_cluster or strong_model)
 
 
 def build_column_hints(question: str) -> dict:
@@ -422,47 +417,71 @@ def build_column_hints(question: str) -> dict:
 
 
 # ======================
-# General profiling → feature proposal → preflight (theme-agnostic)
+# General profiling → feature proposal → preflight
 # ======================
 def profile_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Lightweight schema/profile used by propose_features."""
     prof = []
     for c in df.columns:
         s = df[c]
-        try_dtype = "numeric" if pd.api.types.is_numeric_dtype(s) else \
-                    "datetime" if np.issubdtype(s.dtype, np.datetime64) else "categorical"
+        # coarse type buckets
+        t = "numeric" if pd.api.types.is_numeric_dtype(s) else \
+            ("datetime" if np.issubdtype(s.dtype, np.datetime64) else "categorical")
         nonnull = int(s.notna().sum())
         distinct = int(s.nunique(dropna=True))
         uniq_ratio = distinct / max(nonnull, 1) if nonnull else 0.0
-        near_const = (try_dtype == "numeric" and (s.std(skipna=True) == 0)) or (distinct <= 1)
+
         flags = []
-        name = c.lower()
-        if re.search(r"(^id$|_id$|uuid|guid|hash|^code$|_code$)", name): flags.append("id_like")
-        if re.search(r"(zip|postal|cep|postcode|latitude|longitude|lat|lon)", name): flags.append("geo_like")
-        if try_dtype == "datetime": flags.append("datetime")
-        if near_const: flags.append("near_constant")
-        prof.append(dict(col=c, dtype=str(s.dtype), t=try_dtype, nonnull=nonnull,
-                         distinct=distinct, uniq_ratio=float(uniq_ratio), flags=flags))
+        name = str(c).lower()
+        if re.search(r"(^id$|_id$|uuid|guid|hash|^code$|_code$)", name):
+            flags.append("id_like")
+        if re.search(r"(zip|postal|cep|postcode|latitude|longitude|lat|lon)", name):
+            flags.append("geo_like")
+        if t == "datetime":
+            flags.append("datetime")
+        if (t == "numeric" and (s.std(skipna=True) == 0)) or (distinct <= 1):
+            flags.append("near_constant")
+
+        prof.append({
+            "col": c,
+            "dtype": str(s.dtype),
+            "t": t,
+            "nonnull": nonnull,
+            "distinct": distinct,
+            "uniq_ratio": float(uniq_ratio),
+            "flags": flags,  # safe to access by r["flags"]
+        })
     return pd.DataFrame(prof)
 
 
 def propose_features(task: str, prof: pd.DataFrame, allow_geo: bool=False) -> dict:
+    """Pick reasonable features and document excluded ones with reasons."""
     bad = set()
     for _, r in prof.iterrows():
-        flags = set(r.flags)
-        if "id_like" in flags or "near_constant" in flags or "datetime" in flags:
-            bad.add(r.col)
-        if "geo_like" in flags and not allow_geo:
-            bad.add(r.col)
+        r_flags = set(r.get("flags", []) if isinstance(r.get("flags", []), (list, tuple, set)) else [])
+        colname = r.get("col")
+        if colname is None:
+            continue
+        if "id_like" in r_flags or "near_constant" in r_flags or "datetime" in r_flags:
+            bad.add(colname)
+        if "geo_like" in r_flags and not allow_geo:
+            bad.add(colname)
 
     if task == "clustering":
-        cand = prof[(prof.t == "numeric") & (~prof.col.isin(list(bad)))]["col"].tolist()
+        cand = prof[(prof["t"] == "numeric") & (~prof["col"].isin(list(bad)))]["col"].tolist()
         selected = cand
     else:
-        num = prof[(prof.t == "numeric") & (~prof.col.isin(list(bad)))]["col"].tolist()
+        num = prof[(prof["t"] == "numeric") & (~prof["col"].isin(list(bad)))]["col"].tolist()
         selected = num
 
-    excluded = [{"col": c, "reason": " | ".join(prof.loc[prof.col == c, "flags"].values[0]) if c in set(prof.col) else "filtered"} for c in bad]
-    return {"selected_features": selected, "excluded_features": excluded}
+    excl = []
+    for _, r in prof.iterrows():
+        colname = r.get("col")
+        if colname in bad:
+            r_flags = r.get("flags", [])
+            excl.append({"col": colname, "reason": " | ".join(r_flags) if isinstance(r_flags, (list, tuple)) else str(r_flags)})
+
+    return {"selected_features": selected, "excluded_features": excl}
 
 
 def preflight(task: str, proposal: dict) -> Tuple[bool, str]:
@@ -480,6 +499,7 @@ def preflight(task: str, proposal: dict) -> Tuple[bool, str]:
 def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: List[str], family: str, n_clusters: Optional[int]=None) -> Dict[str, Any]:
     # ---- Clustering ----
     if task == "clustering":
+        # validate or propose features
         if not features:
             prof = profile_columns(df)
             proposal = propose_features("clustering", prof, allow_geo=False)
@@ -916,6 +936,7 @@ def render_final_for_action(ds_step: dict):
                 if result.get("feature_proposal"):
                     st.markdown("**Feature Proposal (auto-derived):**")
                     st.json(result["feature_proposal"])
+                return
             rep = result.get("report", {}) if isinstance(result, dict) else {}
             st.markdown("### 🔍 Clustering Report")
             st.json(rep)
@@ -940,18 +961,18 @@ def render_final_for_action(ds_step: dict):
                 "metrics": {"silhouette": rep.get("silhouette"), "inertia": rep.get("inertia")}
             }
             return
-        else:
-            report = train_model(base, task, target, plan.get("features") or [], (plan.get("model_family") or "logistic_regression").lower())
-            if isinstance(report, dict) and report.get("error"):
-                st.error(report.get("error"))
-            st.markdown("### 🤖 Model Report")
-            st.json(report)
-            add_msg("ds","Model trained.", artifacts={"model_report": report})
-            st.session_state.last_results["modeling"] = {
-                "task": task, "target": target, "features": report.get("features"),
-                "metrics": {k: report.get(k) for k in ["accuracy","roc_auc","mae","rmse","r2"] if k in report}
-            }
-            return
+    # supervised
+        report = train_model(base, task, target, plan.get("features") or [], (plan.get("model_family") or "logistic_regression").lower())
+        if isinstance(report, dict) and report.get("error"):
+            st.error(report.get("error"))
+        st.markdown("### 🤖 Model Report")
+        st.json(report)
+        add_msg("ds","Model trained.", artifacts={"model_report": report})
+        st.session_state.last_results["modeling"] = {
+            "task": task, "target": target, "features": report.get("features"),
+            "metrics": {k: report.get(k) for k in ["accuracy","roc_auc","mae","rmse","r2"] if k in report}
+        }
+        return
 
     # ---- EXPLAIN ----
     if action == "explain":
@@ -1018,7 +1039,7 @@ def run_turn_ceo(new_text: str):
     central = st.session_state.central_question or ""
     prior = st.session_state.prior_questions or []
 
-    # Explicit "not a follow up" or strong action keywords start a new thread
+    # Explicit "not a follow up" starts a new thread
     force_new = _explicit_new_thread(new_text)
 
     ic = classify_intent(prev, central, prior, new_text)
@@ -1049,7 +1070,7 @@ def run_turn_ceo(new_text: str):
 
     effective_q = st.session_state.current_question
 
-    # Desired action extracted from the user's wording (for arbitration)
+    # Desired action extracted from user wording
     desired = extract_desired_action(new_text)
 
     # 0) Column hints
@@ -1065,14 +1086,14 @@ def run_turn_ceo(new_text: str):
     # 1) AM plan
     am_json = run_am_plan(effective_q, col_hints, context=thread_ctx)
 
-    # Enforce user-desired action if AM disagrees
+    # Enforce explicit user-desired action if AM disagrees
     if desired.get("next_action_type"):
         am_json["task_mode"] = "single"
         am_json["next_action_type"] = desired["next_action_type"]
         if desired["next_action_type"] == "modeling" and not am_json.get("plan_for_ds"):
             am_json["plan_for_ds"] = "Run clustering using reasonable numeric features; avoid IDs/geo/datetime; scale features."
 
-    # If AM needs user info, ask and stop until the CEO replies
+    # If AM needs user info, ask and stop
     if am_json.get("need_more_info"):
         qs = am_json.get("clarifying_questions") or ["Could you clarify your objective?"]
         add_msg("am", "I need a bit more context:")
@@ -1080,28 +1101,10 @@ def run_turn_ceo(new_text: str):
             add_msg("am", f"• {q}")
         render_chat(); return
 
-    # 2) DS executes (single or multi)
+    # 2) DS executes and enters review loop
     max_loops = 3
     loop_count = 0
     ds_json = run_ds_step(am_json, col_hints, thread_ctx)
-
-    # Arbitration: ensure DS action matches desired if explicitly asked by user
-    def _plan_matches_desired(plan_action: Optional[str], desired_: dict) -> bool:
-        if not desired_.get("next_action_type"): return True
-        return (plan_action or "").lower() == desired_["next_action_type"]
-
-    if not (ds_json.get("action") or ds_json.get("action_sequence")):
-        ds_json["action"] = am_json.get("next_action_type") or desired.get("next_action_type") or "eda"
-    else:
-        if ds_json.get("action_sequence"):
-            seq = ds_json.get("action_sequence") or []
-            # already normalized in run_ds_step, but guard anyway
-            seq = [s if isinstance(s, dict) else {"action": _coerce_allowed(None, am_json.get("next_action_type") or "eda")} for s in seq]
-            if not any(_plan_matches_desired(s.get("action"), desired) for s in seq):
-                ds_json["action_sequence"][0]["action"] = desired.get("next_action_type", ds_json["action_sequence"][0]["action"])
-        else:
-            if not _plan_matches_desired(ds_json.get("action"), desired):
-                ds_json["action"] = desired.get("next_action_type", ds_json.get("action"))
 
     # If DS asks for clarification explicitly
     if ds_json.get("need_more_info") and (ds_json.get("clarifying_questions") or []):
@@ -1161,7 +1164,7 @@ def run_turn_ceo(new_text: str):
         })
         render_chat()
 
-        # If AM needs clarification from CEO, ask and pause the run
+        # If AM needs clarification from CEO
         if review.get("clarification_needed") and (review.get("clarifying_questions") or []):
             add_msg("am", "Before proceeding, could you clarify:")
             for q in (review.get("clarifying_questions") or [])[:3]:
