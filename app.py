@@ -279,21 +279,17 @@ def add_msg(role, content, artifacts=None):
 
 
 def render_chat(incremental: bool = True):
-    """Incremental chat renderer using last_rendered_idx.
-    Only render messages added since the previous run to avoid full re-renders.
+    """Render the FULL chat history every run so user messages always append.
+    The prior incremental/last_rendered_idx optimization caused confusion in the UI
+    where new messages seemed to replace old ones on rerun. Always re-render.
     """
     msgs = st.session_state.chat
-    # Guard against index drift (e.g., after clearing chat)
-    if st.session_state.last_rendered_idx > len(msgs):
-        st.session_state.last_rendered_idx = 0
-    start = st.session_state.last_rendered_idx if incremental else 0
-    for m in msgs[start:]:
+    for m in msgs:
         with st.chat_message(m["role"]):
             st.write(m["content"])
             if m.get("artifacts"):
                 with st.expander("Artifacts", expanded=False):
                     st.json(m["artifacts"])
-    st.session_state.last_rendered_idx = len(msgs)
 
 
 def _sql_first(maybe_sql):
@@ -376,23 +372,10 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
     report: Dict[str, Any] = {}
 
     if task == "clustering":
-        # 1) Choose candidate feature columns
-        requested_cols = features if features else [c for c in df.columns]
-        # Keep only columns that exist AND are numeric
-        use_cols = [c for c in requested_cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        use_cols = features if features else [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         if not use_cols:
-            # Fallback: all numeric columns in df
-            use_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        if not use_cols:
-            return {"error": "No numeric features available for clustering in the selected dataset."}
-
-        # 2) Clean and scale
+            return {"error": "No numeric features available for clustering."}
         X = df[use_cols].copy()
-        # Drop rows that are all-NaN across selected features
-        X = X.dropna(how="all")
-        # Impute remaining NaNs per-column with median to avoid KMeans failures
-        X = X.fillna(X.median(numeric_only=True))
-
         scaler = StandardScaler()
         Xs = scaler.fit_transform(X)
         k = int(n_clusters or 3)
@@ -484,26 +467,6 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
 # AM/DS/Review pipeline (updated for multi‑step and history)
 # ======================
 
-# --- Early helper to avoid NameError when run_ds_step_single calls render before it's defined
-# (Streamlit executes top-to-bottom; a pipeline call can happen before later defs are executed.)
-
-def _render_final(ds_json: dict):
-    """Wrapper so calls don't fail if render_final hasn't been defined yet.
-    If the full renderer exists, delegate to it; otherwise do a minimal safe display.
-    """
-    try:
-        if 'render_final' in globals() and callable(globals()['render_final']):
-            return globals()['render_final'](ds_json)
-    except Exception:
-        pass
-    # Minimal fallback: just echo the action and any SQL/model plan for visibility
-    with st.expander("(Temporary output — full renderer not ready this run)", expanded=False):
-        st.json({
-            "action": (ds_json or {}).get("action"),
-            "duckdb_sql": (ds_json or {}).get("duckdb_sql"),
-            "model_plan": (ds_json or {}).get("model_plan"),
-        })
-
 def run_am_plan(prompt: str, column_hints: dict, user_history: List[str]) -> dict:
     payload = {
         "ceo_question": prompt,
@@ -555,16 +518,8 @@ def run_ds_step_single(am_next_action: str, column_hints: dict, current_q: str, 
         ds_action = synonym_map.get(ds_action, am_next_action)
         ds_json["action"] = ds_action
 
-        # Render this step immediately with guard
-    try:
-        _render_final(ds_json)
-    except Exception as e:
-        # Show actionable details without leaking sensitive info
-        add_msg("system", f"Render error: {type(e).__name__}: {e}")
-        try:
-            st.exception(e)
-        except Exception:
-            pass
+    # Render this step immediately
+    render_final(ds_json)
     return ds_json
 
 
@@ -657,35 +612,112 @@ def build_meta(ds_json: dict) -> dict:
     if action == "modeling":
         sql = _sql_first(ds_json.get("duckdb_sql"))
         plan = ds_json.get("model_plan") or {}
+        target = plan.get("target")
+        try:
+            base = run_duckdb_sql(sql) if sql else None
+            if base is None:
+                for _, df in get_all_tables().items():
+                    if target and target in df.columns:
+                        base = df.copy(); break
+                if base is None:
+                    base = next(iter(get_all_tables().values())).copy()
+            return {"type": "modeling", "task": (plan.get("task") or "classification").lower(),
+                    "target": target, "features": plan.get("features") or [],
+                    "family": (plan.get("model_family") or "logistic_regression").lower(),
+                    "n_clusters": plan.get("n_clusters"),
+                    "rows": len(base), "cols": list(base.columns)}
+        except Exception as e:
+            return {"type": "modeling", "error": str(e)}
+
+    return {"type": action or "unknown", "note": "no meta builder"}
+
+
+# ======================
+# Render final result (unchanged rendering but works per step)
+# ======================
+
+def render_final(ds_json: dict):
+    action = (ds_json.get("action") or "").lower()
+
+    if action == "overview":
+        st.markdown("### 📊 Table Previews (first 5 rows)")
+        for name, df in get_all_tables().items():
+            st.markdown(f"**{name}** — rows: {len(df)}, cols: {len(df.columns)}")
+            st.dataframe(df.head(5), width="stretch")
+        add_msg("ds", "Overview rendered."); render_chat(); return
+
+    if action == "eda":
+        raw_sql = ds_json.get("duckdb_sql")
+        sql_list = raw_sql if isinstance(raw_sql, list) else [raw_sql]
+        charts_all = ds_json.get("charts") or []
+        for i, sql in enumerate([_sql_first(s) for s in sql_list][:3]):
+            if not sql: continue
+            try:
+                df = run_duckdb_sql(sql)
+                st.markdown(f"### 📈 EDA Result #{i+1} (first 50 rows)")
+                st.code(sql, language="sql")
+                st.dataframe(df.head(50), width="stretch")
+
+                charts_this = []
+                if charts_all and isinstance(charts_all[0], dict):
+                    charts_this = charts_all if i == 0 else []
+                elif charts_all and isinstance(charts_all[0], list):
+                    charts_this = charts_all[i] if i < len(charts_all) else []
+                for spec in (charts_this or [])[:3]:
+                    title = spec.get("title") or "Chart"
+                    ctype = (spec.get("type") or "bar").lower()
+                    xcol = spec.get("x"); ycol = spec.get("y")
+                    if isinstance(xcol,str) and isinstance(ycol,str) and xcol in df.columns and ycol in df.columns:
+                        st.markdown(f"**{title}**")
+                        plot_df = df[[xcol, ycol]].set_index(xcol)
+                        if ctype == "line": st.line_chart(plot_df)
+                        elif ctype == "area": st.area_chart(plot_df)
+                        else: st.bar_chart(plot_df)
+            except Exception as e:
+                st.error(f"EDA SQL failed: {e}")
+        add_msg("ds","EDA rendered."); render_chat(); return
+
+    if action == "sql":
+        sql = _sql_first(ds_json.get("duckdb_sql"))
+        if not sql:
+            add_msg("ds","No SQL provided."); render_chat(); return
+        try:
+            out = run_duckdb_sql(sql)
+            st.markdown("### 🧮 SQL Results (first 25 rows)")
+            st.code(sql, language="sql")
+            st.dataframe(out.head(25), width="stretch")
+            add_msg("ds","SQL executed.", artifacts={"sql": sql}); render_chat()
+        except Exception as e:
+            st.error(f"SQL failed: {e}")
+        return
+
+    if action == "calc":
+        st.markdown("### 🧮 Calculation")
+        st.write(ds_json.get("calc_description","(no description)"))
+        add_msg("ds","Calculation displayed."); render_chat(); return
+
+    if action == "feature_engineering":
+        sql = _sql_first(ds_json.get("duckdb_sql"))
+        base = run_duckdb_sql(sql) if sql else next(iter(get_all_tables().values())).copy()
+        st.markdown("### 🧱 Feature Engineering Base (first 20 rows)")
+        st.dataframe(base.head(20), width="stretch")
+        st.session_state.tables_fe["feature_base"] = base
+        add_msg("ds","Feature base ready (saved as 'feature_base')."); render_chat(); return
+
+    if action == "modeling":
+        sql = _sql_first(ds_json.get("duckdb_sql"))
+        plan = ds_json.get("model_plan") or {}
         task = (plan.get("task") or "classification").lower()
         target = plan.get("target")
-        # 1) Choose a base dataframe
-        base: Optional[pd.DataFrame] = None
-        if sql:
-            try:
-                base = run_duckdb_sql(sql)
-            except Exception as e:
-                st.warning(f"Modeling SQL failed, falling back to available tables. Error: {e}")
+        base = run_duckdb_sql(sql) if sql else None
         if base is None:
-            # Prefer previously saved feature_base
-            if "feature_base" in st.session_state.tables_fe:
-                base = st.session_state.tables_fe["feature_base"].copy()
-            else:
-                # If features are specified, pick the table with the most feature overlap
-                desired = plan.get("features") or []
-                best_tbl, best_overlap = None, -1
-                for _, df in get_all_tables().items():
-                    overlap = len([c for c in desired if c in df.columns]) if desired else 0
-                    if overlap > best_overlap:
-                        best_overlap, best_tbl = overlap, df
-                base = best_tbl.copy() if best_tbl is not None else next(iter(get_all_tables().values())).copy()
-        # 2) Run task
+            for _, df in get_all_tables().items():
+                if (task == "clustering") or (target and target in df.columns):
+                    base = df.copy(); break
+            if base is None:
+                base = next(iter(get_all_tables().values())).copy()
         if task == "clustering":
             result = train_model(base, task, None, plan.get("features") or [], plan.get("model_family") or "", plan.get("n_clusters"))
-            if isinstance(result, dict) and result.get("error"):
-                st.error(result["error"])  # user-facing message
-                add_msg("ds", f"Clustering failed: {result['error']}")
-                render_chat(); return
             rep = result.get("report", {}) if isinstance(result, dict) else {}
             st.markdown("### 🔍 Clustering Report")
             st.json(rep)
