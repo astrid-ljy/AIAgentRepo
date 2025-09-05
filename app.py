@@ -86,7 +86,7 @@ Use history to understand whether the user is giving feedback/follow-up, and kee
 
 **General safety for any theme:**
 - Before modeling/clustering, browse available data (schema) and propose features with reasons.
-- Dynamically exclude identifier-like, geo/postal-like, datetime, near-constant, and obviously leaky features (based on names + quick stats).
+- Dynamically exclude identifier-like, geo/postal-like, datetime, and near-constant features (names + quick stats).
 - Run a preflight check; if it fails (e.g., <2 features for clustering), ask a clarifying question rather than running.
 
 Return JSON fields:
@@ -172,9 +172,9 @@ with st.sidebar:
 # ======================
 # State
 # ======================
-if "tables_raw" not in st.session_state: st.session_state.tables_raw = None  # originals
-if "tables_fe"  not in st.session_state: st.session_state.tables_fe  = {}    # feature-engineered snapshots
-if "tables"     not in st.session_state: st.session_state.tables     = None  # default view (merged)
+if "tables_raw" not in st.session_state: st.session_state.tables_raw = None
+if "tables_fe"  not in st.session_state: st.session_state.tables_fe  = {}
+if "tables"     not in st.session_state: st.session_state.tables     = None
 if "chat"       not in st.session_state: st.session_state.chat       = []
 if "last_rendered_idx" not in st.session_state: st.session_state.last_rendered_idx = 0
 if "last_am_json" not in st.session_state: st.session_state.last_am_json = {}
@@ -190,11 +190,11 @@ if "last_results" not in st.session_state:
         "sql": None,
         "eda": None,
         "feature_engineering": None,
-        "modeling": None,      # supervised model summary
-        "clustering": None,    # clustering specifics
+        "modeling": None,      # supervised summary
+        "clustering": None,    # clustering report
     }
 
-# Lightweight business term synonyms (heuristic fallback)
+# Lightweight business term synonyms
 TERM_SYNONYMS: Dict[str, List[str]] = {
     "revenue": ["revenue", "sales", "sales_amount", "net_sales", "turnover", "gmv", "amount"],
     "profit": ["profit", "net_income", "margin", "gross_profit", "operating_income"],
@@ -277,7 +277,6 @@ def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
 
 
 def get_all_tables() -> Dict[str, pd.DataFrame]:
-    """Merge raw + feature-engineered, with FE versions accessible via their own names."""
     out = {}
     if st.session_state.tables_raw:
         out.update(st.session_state.tables_raw)
@@ -310,7 +309,6 @@ def render_chat(incremental: bool = True):
 
 
 def _sql_first(maybe_sql):
-    """Return first non-empty SQL if input is str or list of str; else ''."""
     if isinstance(maybe_sql, str):
         return maybe_sql.strip()
     if isinstance(maybe_sql, list):
@@ -320,26 +318,12 @@ def _sql_first(maybe_sql):
     return ""
 
 
-def is_data_inventory_question(text: str) -> bool:
-    """Heuristic: force 'overview' for data-inventory prompts, unless explicit analysis keywords appear."""
-    q = (text or "").lower()
-    if re.search(r"\bcluster(ing)?\b|\bmodel(ing)?\b|\beda\b|\bsql\b|\bexplain\b|\binterpret\b", q):
-        return False
-    triggers = [
-        "what data do we have", "what data do i have", "what data do we have here",
-        "what tables do we have", "what datasets", "first 5 rows", "first five rows",
-        "preview tables", "show tables", "data inventory"
-    ]
-    return any(t in q for t in triggers)
-
-
 def _explicit_new_thread(text: str) -> bool:
     t = (text or "").lower()
     return bool(re.search(r"\bnot (a|an)?\s*follow[- ]?up\b", t))
 
 
 def classify_intent(previous_question: str, central_question: str, prior_questions: List[str], new_text: str) -> dict:
-    """LLM-based intent classification with graceful fallback and relatedness."""
     try:
         payload = {
             "previous_question": previous_question or "",
@@ -354,34 +338,16 @@ def classify_intent(previous_question: str, central_question: str, prior_questio
             return {"intent": intent, "related": related}
     except Exception:
         pass
-    # Fallback heuristic
     low = (new_text or "").lower()
     if any(w in low for w in ["that", "this", "looks", "seems", "instead", "also", "why", "how about", "can you", "explain", "interpret"]):
         return {"intent": "feedback", "related": True}
     return {"intent": "new_request", "related": False}
 
 
-def extract_desired_action(text: str) -> dict:
-    t = (text or "").lower()
-    if re.search(r"\bcluster(ing)?\b", t):
-        return {"next_action_type": "modeling", "model_task": "clustering"}
-    if re.search(r"\bexplain|interpret|what features\b", t):
-        return {"next_action_type": "explain"}
-    if re.search(r"\beda\b|\bexplor(ation|atory)\b", t):
-        return {"next_action_type": "eda"}
-    if re.search(r"\bsql\b|select\s+.+\s+from\b", t):
-        return {"next_action_type": "sql"}
-    if re.search(r"\bfeature engineer(ing)?\b|\bfeatur(e|es)\b", t):
-        return {"next_action_type": "feature_engineering"}
-    return {}
-
-
 def build_column_hints(question: str) -> dict:
-    """Use LLM + heuristic synonyms to propose relevant columns across raw + FE tables."""
     all_tables = get_all_tables()
     struct = {t: list(df.columns) for t, df in all_tables.items()}
     hints = {"term_to_columns": {}, "suggested_features": [], "notes": ""}
-    # Heuristic first
     qlow = (question or "").lower()
     for term, cands in TERM_SYNONYMS.items():
         if term in qlow:
@@ -394,7 +360,6 @@ def build_column_hints(question: str) -> dict:
             if found:
                 hints["term_to_columns"][term] = found[:5]
                 hints["suggested_features"].extend(found[:3])
-    # LLM refinement
     try:
         payload = {"question": question, "tables": struct}
         res = llm_json(SYSTEM_COLMAP, json.dumps(payload)) or {}
@@ -406,7 +371,6 @@ def build_column_hints(question: str) -> dict:
             hints["notes"] = (hints.get("notes") or "") + " " + res["notes"]
     except Exception:
         pass
-    # dedupe suggested_features
     seen = set(); uniq = []
     for it in hints["suggested_features"]:
         key = (it.get("table"), it.get("column"))
@@ -417,20 +381,16 @@ def build_column_hints(question: str) -> dict:
 
 
 # ======================
-# General profiling → feature proposal → preflight
+# Profiling → feature proposal → preflight
 # ======================
 def profile_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Lightweight schema/profile used by propose_features."""
     prof = []
     for c in df.columns:
         s = df[c]
-        # coarse type buckets
-        t = "numeric" if pd.api.types.is_numeric_dtype(s) else \
-            ("datetime" if np.issubdtype(s.dtype, np.datetime64) else "categorical")
+        t = "numeric" if pd.api.types.is_numeric_dtype(s) else ("datetime" if np.issubdtype(s.dtype, np.datetime64) else "categorical")
         nonnull = int(s.notna().sum())
         distinct = int(s.nunique(dropna=True))
         uniq_ratio = distinct / max(nonnull, 1) if nonnull else 0.0
-
         flags = []
         name = str(c).lower()
         if re.search(r"(^id$|_id$|uuid|guid|hash|^code$|_code$)", name):
@@ -441,50 +401,37 @@ def profile_columns(df: pd.DataFrame) -> pd.DataFrame:
             flags.append("datetime")
         if (t == "numeric" and (s.std(skipna=True) == 0)) or (distinct <= 1):
             flags.append("near_constant")
-
-        prof.append({
-            "col": c,
-            "dtype": str(s.dtype),
-            "t": t,
-            "nonnull": nonnull,
-            "distinct": distinct,
-            "uniq_ratio": float(uniq_ratio),
-            "flags": flags,  # safe to access by r["flags"]
-        })
+        prof.append({"col": c, "dtype": str(s.dtype), "t": t,
+                     "nonnull": nonnull, "distinct": distinct,
+                     "uniq_ratio": float(uniq_ratio), "flags": flags})
     return pd.DataFrame(prof)
 
 
 def propose_features(task: str, prof: pd.DataFrame, allow_geo: bool=False) -> dict:
-    """Pick reasonable features and document excluded ones with reasons."""
     bad = set()
     for _, r in prof.iterrows():
-        r_flags = set(r.get("flags", []) if isinstance(r.get("flags", []), (list, tuple, set)) else [])
-        colname = r.get("col")
-        if colname is None:
+        rflags = set(r.get("flags", []) if isinstance(r.get("flags", []), (list, tuple, set)) else [])
+        col = r.get("col")
+        if col is None: 
             continue
-        if "id_like" in r_flags or "near_constant" in r_flags or "datetime" in r_flags:
-            bad.add(colname)
-        if "geo_like" in r_flags and not allow_geo:
-            bad.add(colname)
-
+        if "id_like" in rflags or "near_constant" in rflags or "datetime" in rflags:
+            bad.add(col)
+        if "geo_like" in rflags and not allow_geo:
+            bad.add(col)
     if task == "clustering":
-        cand = prof[(prof["t"] == "numeric") & (~prof["col"].isin(list(bad)))]["col"].tolist()
-        selected = cand
+        selected = prof[(prof["t"]=="numeric") & (~prof["col"].isin(list(bad))) ]["col"].tolist()
     else:
-        num = prof[(prof["t"] == "numeric") & (~prof["col"].isin(list(bad)))]["col"].tolist()
-        selected = num
-
-    excl = []
+        selected = prof[(prof["t"]=="numeric") & (~prof["col"].isin(list(bad))) ]["col"].tolist()
+    excluded = []
     for _, r in prof.iterrows():
-        colname = r.get("col")
-        if colname in bad:
-            r_flags = r.get("flags", [])
-            excl.append({"col": colname, "reason": " | ".join(r_flags) if isinstance(r_flags, (list, tuple)) else str(r_flags)})
+        col = r.get("col")
+        if col in bad:
+            rflags = r.get("flags", [])
+            excluded.append({"col": col, "reason": " | ".join(rflags) if isinstance(rflags, (list, tuple)) else str(rflags)})
+    return {"selected_features": selected, "excluded_features": excluded}
 
-    return {"selected_features": selected, "excluded_features": excl}
 
-
-def preflight(task: str, proposal: dict) -> Tuple[bool, str]:
+def preflight(task: str, proposal: dict) -> tuple[bool, str]:
     feats = proposal.get("selected_features") or []
     if task == "clustering" and len(feats) < 2:
         return False, "Need at least 2 numeric features for clustering after filtering."
@@ -494,49 +441,89 @@ def preflight(task: str, proposal: dict) -> Tuple[bool, str]:
 
 
 # ======================
+# Smart base chooser (browses all tables)
+# ======================
+DIM_PAT = re.compile(r"product_(weight_g|length_cm|height_cm|width_cm)$", re.I)
+
+def choose_model_base(plan: dict, question_text: str) -> Optional[pd.DataFrame]:
+    """
+    Browse ALL loaded tables and pick the best single base:
+    - If the question mentions product/dimension: pick the table with the MOST numeric dimension-like columns.
+    - Else score each table by count of usable numeric features (post filtering) and choose the best.
+    (You can still join with other tables via SQL in earlier steps.)
+    """
+    tables = get_all_tables()
+    if not tables: return None
+    qlow = (question_text or "").lower()
+
+    # If product/dimension ask → prefer most dimension-like columns
+    if re.search(r"\bproduct\b", qlow) or re.search(r"\bdimension", qlow):
+        best_name, best_score = None, -1
+        for name, df in tables.items():
+            dims = [c for c in df.columns if DIM_PAT.search(str(c)) and pd.api.types.is_numeric_dtype(df[c])]
+            score = len(dims)
+            if score > best_score:
+                best_name, best_score = name, score
+        if best_name is not None and best_score >= 2:
+            return tables[best_name].copy()
+
+    # Generic scoring by usable numeric features
+    best_name, best_score = None, -1
+    for name, df in tables.items():
+        prof = profile_columns(df)
+        prop = propose_features("clustering", prof, allow_geo=False)
+        score = len(prop.get("selected_features", []))
+        if score > best_score:
+            best_name, best_score = name, score
+    return tables[best_name].copy() if best_name else next(iter(tables.values())).copy()
+
+
+# ======================
 # Modeling (incl. clustering)
 # ======================
 def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: List[str], family: str, n_clusters: Optional[int]=None) -> Dict[str, Any]:
-    # ---- Clustering ----
     if task == "clustering":
-        # validate or propose features
-        if not features:
-            prof = profile_columns(df)
-            proposal = propose_features("clustering", prof, allow_geo=False)
-            ok, msg = preflight("clustering", proposal)
-            if not ok:
-                return {"error": msg, "feature_proposal": proposal}
-            use_cols = proposal["selected_features"]
+        # Prefer explicit dimension columns if present
+        dim_like = [c for c in df.columns if DIM_PAT.search(str(c))]
+        dim_like = [c for c in dim_like if pd.api.types.is_numeric_dtype(df[c])]
+        if not features and len(dim_like) >= 2:
+            use_cols = dim_like
         else:
-            use_cols = [c for c in features if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
-            if len(use_cols) < 2:
+            if not features:
                 prof = profile_columns(df)
-                proposal = propose_features("clustering", prof, allow_geo=False)
-                ok, msg = preflight("clustering", proposal)
+                prop = propose_features("clustering", prof, allow_geo=False)
+                ok, msg = preflight("clustering", prop)
                 if not ok:
-                    return {"error": msg, "feature_proposal": proposal}
-                use_cols = proposal["selected_features"]
+                    return {"error": msg, "feature_proposal": prop}
+                use_cols = prop["selected_features"]
+            else:
+                use_cols = [c for c in features if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+                if len(use_cols) < 2:
+                    prof = profile_columns(df)
+                    prop = propose_features("clustering", prof, allow_geo=False)
+                    ok, msg = preflight("clustering", prop)
+                    if not ok:
+                        return {"error": msg, "feature_proposal": prop}
+                    use_cols = prop["selected_features"]
 
         X = df[use_cols].copy()
         scaler = StandardScaler()
         Xs = scaler.fit_transform(X)
-        k = int(n_clusters or 3)
-        kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
-        labels = kmeans.fit_predict(Xs)
+        k = int(n_clusters or 5)
+        km = KMeans(n_clusters=k, n_init=10, random_state=42)
+        labels = km.fit_predict(Xs)
         try:
             sil = float(silhouette_score(Xs, labels)) if k > 1 else None
         except Exception:
             sil = None
-        # PCA for visualization
         try:
             p = PCA(n_components=2, random_state=42)
             coords = p.fit_transform(Xs)
             coords_df = pd.DataFrame({"pc1": coords[:,0], "pc2": coords[:,1], "cluster": labels})
         except Exception:
             coords_df = None
-        # centroids back to original units
         try:
-            centers_std = kmeans.cluster_centers_
+            centers_std = km.cluster_centers_
             centers_orig = scaler.inverse_transform(centers_std)
             centroids_df = pd.DataFrame(centers_orig, columns=use_cols)
         except Exception:
@@ -548,7 +535,7 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
             "features": use_cols,
             "n_clusters": k,
             "cluster_sizes": {int(k_): int(v) for k_, v in sizes.items()},
-            "inertia": float(getattr(kmeans, "inertia_", np.nan)),
+            "inertia": float(getattr(km, "inertia_", np.nan)),
             "silhouette": sil,
         }
         return {"report": report, "labels": labels.tolist(), "pca": coords_df, "centroids": centroids_df}
@@ -556,15 +543,6 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
     # ---- Supervised ----
     if target is None or target not in df.columns:
         return {"error": f"Target '{target}' not found."}
-
-    # If features empty, propose
-    if not features:
-        prof = profile_columns(df)
-        proposal = propose_features("classification" if task=="classification" else "regression", prof, allow_geo=False)
-        ok, msg = preflight(task, proposal)
-        if not ok:
-            return {"error": msg, "feature_proposal": proposal}
-        features = proposal["selected_features"]
 
     X = df[features] if features else df.drop(columns=[target], errors="ignore")
     y = df[target]
@@ -654,7 +632,6 @@ def _coerce_allowed(action: Optional[str], fallback: str) -> str:
 
 
 def _normalize_sequence(seq, fallback_action) -> List[dict]:
-    """Coerce an LLM-returned sequence into a list of dict steps with valid actions."""
     out: List[dict] = []
     for raw in (seq or [])[:5]:
         if isinstance(raw, dict):
@@ -670,7 +647,6 @@ def _normalize_sequence(seq, fallback_action) -> List[dict]:
             a = _coerce_allowed(raw, fallback_action)
             out.append({"action": a, "duckdb_sql": None, "charts": None,
                         "model_plan": None, "calc_description": None})
-        # ignore other types
     if not out:
         out = [{"action": _coerce_allowed(None, fallback_action),
                 "duckdb_sql": None, "charts": None,
@@ -692,7 +668,6 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
     st.session_state.last_ds_json = ds_json
 
-    # Normalize single vs multi
     am_mode = (am_json.get("task_mode") or ("multi" if am_json.get("action_sequence") else "single")).lower()
     if am_mode == "multi":
         seq = ds_json.get("action_sequence") or am_json.get("action_sequence") or []
@@ -791,12 +766,9 @@ def build_meta_for_action(ds_step: dict) -> dict:
         try:
             base = run_duckdb_sql(sql) if sql else None
             if base is None:
-                # search both FE and RAW
-                for _, df in get_all_tables().items():
-                    if (plan.get("task") == "clustering") or (target and target in df.columns):
-                        base = df.copy(); break
-                if base is None:
-                    base = next(iter(get_all_tables().values())).copy()
+                base = choose_model_base(plan, st.session_state.current_question)
+            if base is None:
+                return {"type":"modeling","error":"No tables loaded."}
             return {"type": "modeling", "task": (plan.get("task") or "classification").lower(),
                     "target": target, "features": plan.get("features") or [],
                     "family": (plan.get("model_family") or "logistic_regression").lower(),
@@ -875,7 +847,6 @@ def render_final_for_action(ds_step: dict):
                         else: st.bar_chart(plot_df)
             except Exception as e:
                 st.error(f"EDA SQL failed: {e}")
-        # cache for explain
         st.session_state.last_results["eda"] = {"sqls": executed_sqls, "sample_cols": last_cols}
         add_msg("ds","EDA rendered.")
         return
@@ -923,12 +894,8 @@ def render_final_for_action(ds_step: dict):
         target = plan.get("target")
         base = run_duckdb_sql(sql) if sql else None
         if base is None:
-            # search both FE and RAW
-            for _, df in get_all_tables().items():
-                if (task == "clustering") or (target and target in df.columns):
-                    base = df.copy(); break
-            if base is None:
-                base = next(iter(get_all_tables().values())).copy()
+            base = choose_model_base(plan, st.session_state.current_question)
+
         if task == "clustering":
             result = train_model(base, task, None, plan.get("features") or [], plan.get("model_family") or "", plan.get("n_clusters"))
             if result.get("error"):
@@ -961,7 +928,7 @@ def render_final_for_action(ds_step: dict):
                 "metrics": {"silhouette": rep.get("silhouette"), "inertia": rep.get("inertia")}
             }
             return
-    # supervised
+
         report = train_model(base, task, target, plan.get("features") or [], (plan.get("model_family") or "logistic_regression").lower())
         if isinstance(report, dict) and report.get("error"):
             st.error(report.get("error"))
@@ -1070,9 +1037,6 @@ def run_turn_ceo(new_text: str):
 
     effective_q = st.session_state.current_question
 
-    # Desired action extracted from user wording
-    desired = extract_desired_action(new_text)
-
     # 0) Column hints
     col_hints = build_column_hints(effective_q)
 
@@ -1085,13 +1049,6 @@ def run_turn_ceo(new_text: str):
 
     # 1) AM plan
     am_json = run_am_plan(effective_q, col_hints, context=thread_ctx)
-
-    # Enforce explicit user-desired action if AM disagrees
-    if desired.get("next_action_type"):
-        am_json["task_mode"] = "single"
-        am_json["next_action_type"] = desired["next_action_type"]
-        if desired["next_action_type"] == "modeling" and not am_json.get("plan_for_ds"):
-            am_json["plan_for_ds"] = "Run clustering using reasonable numeric features; avoid IDs/geo/datetime; scale features."
 
     # If AM needs user info, ask and stop
     if am_json.get("need_more_info"):
@@ -1139,7 +1096,7 @@ def run_turn_ceo(new_text: str):
         else:
             # Guarantee a non-empty action
             if not ds_json_local.get("action"):
-                ds_json_local["action"] = am_json.get("next_action_type") or desired.get("next_action_type") or "eda"
+                ds_json_local["action"] = am_json.get("next_action_type") or "eda"
             render_final_for_action({
                 "action": ds_json_local.get("action"),
                 "duckdb_sql": ds_json_local.get("duckdb_sql"),
@@ -1188,9 +1145,9 @@ def run_turn_ceo(new_text: str):
             add_msg("ds", ds_json.get("ds_summary","(revised)"),
                     artifacts={"mode": "multi" if ds_json.get("action_sequence") else "single"})
             render_chat()
-            continue  # loop back for another review
+            continue  # loop for another review
 
-        # No revision required → render the current best and exit
+        # No revision required → render current best and exit
         _render(ds_json)
         return
 
@@ -1218,7 +1175,7 @@ load_if_needed()
 st.subheader("Chat")
 render_chat()
 
-user_prompt = st.chat_input("You're the CEO. Ask a question (e.g., 'What data do we have?' or 'Cluster product dimensions')")
+user_prompt = st.chat_input("You're the CEO. Ask a question (e.g., 'Cluster product dimensions', 'Explain the clusters')")
 if user_prompt:
     add_msg("user", user_prompt)
     render_chat()
