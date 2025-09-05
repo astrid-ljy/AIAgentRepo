@@ -535,8 +535,16 @@ def run_ds_step_single(am_next_action: str, column_hints: dict, current_q: str, 
         ds_action = synonym_map.get(ds_action, am_next_action)
         ds_json["action"] = ds_action
 
-    # Render this step immediately
-    render_final(ds_json)
+    # Render this step immediately with guard
+    try:
+        render_final(ds_json)
+    except Exception as e:
+        # Show actionable details without leaking sensitive info
+        add_msg("system", f"Render error: {type(e).__name__}: {e}")
+        try:
+            st.exception(e)
+        except Exception:
+            pass
     return ds_json
 
 
