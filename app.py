@@ -449,16 +449,13 @@ def propose_features(task: str, prof: pd.DataFrame, allow_geo: bool=False) -> di
     for _, r in prof.iterrows():
         rflags = set(r.get("flags", []) if isinstance(r.get("flags", []), (list, tuple, set)) else [])
         col = r.get("col")
-        if col is None: 
+        if col is None:
             continue
         if "id_like" in rflags or "near_constant" in rflags or "datetime" in rflags:
             bad.add(col)
         if "geo_like" in rflags and not allow_geo:
             bad.add(col)
-    if task == "clustering":
-        selected = prof[(prof["t"]=="numeric") & (~prof["col"].isin(list(bad))) ]["col"].tolist()
-    else:
-        selected = prof[(prof["t"]=="numeric") & (~prof["col"].isin(list(bad))) ]["col"].tolist()
+    selected = prof[(prof["t"]=="numeric") & (~prof["col"].isin(list(bad))) ]["col"].tolist()
     excluded = []
     for _, r in prof.iterrows():
         col = r.get("col")
@@ -472,7 +469,7 @@ def preflight(task: str, proposal: dict) -> tuple[bool, str]:
     feats = proposal.get("selected_features") or []
     if task == "clustering" and len(feats) < 2:
         return False, "Need at least 2 numeric features for clustering after filtering."
-    if not_feats := len(feats) == 0:
+    if not feats:
         return False, "No usable features after filtering."
     return True, ""
 
@@ -566,10 +563,26 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
                         return {"error": msg, "feature_proposal": prop}
                     use_cols = prop["selected_features"]
 
+        # Build robust X: coerce numeric, handle inf/NaN, impute, scale
         X = df[use_cols].copy()
+        for c in use_cols:
+            X[c] = pd.to_numeric(X[c], errors="coerce")
+        X.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # Drop rows with all-NaN across selected features
+        X = X.dropna(how="all")
+        if X.shape[0] < 2:
+            return {"error": "Not enough valid rows after cleaning to run clustering."}
+
+        imputer = SimpleImputer(strategy="median")
+        X_imp = imputer.fit_transform(X)
         scaler = StandardScaler()
-        Xs = scaler.fit_transform(X)
-        k = int(n_clusters or 5)
+        Xs = scaler.fit_transform(X_imp)
+
+        k_requested = int(n_clusters or 5)
+        n_samples = Xs.shape[0]
+        k = max(1, min(k_requested, n_samples))  # k cannot exceed n_samples
+
         km = KMeans(n_clusters=k, n_init=10, random_state=42)
         labels = km.fit_predict(Xs)
         try:
@@ -895,7 +908,6 @@ def render_final_for_action(ds_step: dict):
                 st.markdown(f"### 📈 EDA Result #{i+1} (first 50 rows)")
                 st.code(sql, language="sql")
                 st.dataframe(df.head(50), width="stretch")
-
                 charts_this = []
                 if charts_all and isinstance(charts_all[0], dict):
                     charts_this = charts_all if i == 0 else []
@@ -1073,6 +1085,10 @@ def must_progress_to_modeling(thread_ctx: dict, am_json: dict, ds_json: dict) ->
     Conservative default: False unless the CEO clearly asked for modeling/segmentation
     and neither AM nor DS already planned to model in this turn.
     """
+    # NEW: never auto-progress when AM asked for an EXPLAIN turn
+    if (am_json.get("next_action_type") or "").lower() == "explain":
+        return False
+
     if (am_json.get("next_action_type") or "").lower() == "modeling":
         return False
     if (ds_json.get("action") or "").lower() == "modeling":
