@@ -484,6 +484,26 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
 # AM/DS/Review pipeline (updated for multi‑step and history)
 # ======================
 
+# --- Early helper to avoid NameError when run_ds_step_single calls render before it's defined
+# (Streamlit executes top-to-bottom; a pipeline call can happen before later defs are executed.)
+
+def _render_final(ds_json: dict):
+    """Wrapper so calls don't fail if render_final hasn't been defined yet.
+    If the full renderer exists, delegate to it; otherwise do a minimal safe display.
+    """
+    try:
+        if 'render_final' in globals() and callable(globals()['render_final']):
+            return globals()['render_final'](ds_json)
+    except Exception:
+        pass
+    # Minimal fallback: just echo the action and any SQL/model plan for visibility
+    with st.expander("(Temporary output — full renderer not ready this run)", expanded=False):
+        st.json({
+            "action": (ds_json or {}).get("action"),
+            "duckdb_sql": (ds_json or {}).get("duckdb_sql"),
+            "model_plan": (ds_json or {}).get("model_plan"),
+        })
+
 def run_am_plan(prompt: str, column_hints: dict, user_history: List[str]) -> dict:
     payload = {
         "ceo_question": prompt,
@@ -535,9 +555,9 @@ def run_ds_step_single(am_next_action: str, column_hints: dict, current_q: str, 
         ds_action = synonym_map.get(ds_action, am_next_action)
         ds_json["action"] = ds_action
 
-    # Render this step immediately with guard
+        # Render this step immediately with guard
     try:
-        render_final(ds_json)
+        _render_final(ds_json)
     except Exception as e:
         # Show actionable details without leaking sensitive info
         add_msg("system", f"Render error: {type(e).__name__}: {e}")
