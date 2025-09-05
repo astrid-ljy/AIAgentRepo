@@ -49,7 +49,7 @@ You are the Analytics Manager (AM). Plan how to answer the CEO’s business ques
 
 Use the provided `column_hints` to resolve business terms (e.g., revenue → sales) strictly to existing columns.
 
-You can see the CEO's **current question**, the **central question of the active thread**, and **all prior questions in this session**. Use this context to determine whether the current input is a new request or a follow‑up, and to keep the plan aligned with the central question when it’s a follow‑up or feedback.
+You can see the CEO's **current question**, the **central question of the active thread**, and **all prior questions in this session**. Use this context to determine whether the current input is a new request or a follow-up, and to keep the plan aligned with the central question when it’s a follow-up or feedback.
 
 Output JSON fields:
 - am_brief: 1–2 sentences paraphrasing the question for a profit-oriented plan (do not repeat verbatim).
@@ -70,7 +70,7 @@ You are the Data Scientist (DS). Execute the AM plan using only available column
 You can see:
 - `am_next_action_type` OR `am_action_sequence`
 - `current_question`, `central_question`, and `prior_questions` (all previous CEO inputs)
-Use that history to understand whether the user is giving feedback/follow‑up, and keep your work anchored to the **central question**. If the current message is feedback, explain how you will revise to address it.
+Use that history to understand whether the user is giving feedback/follow-up, and keep your work anchored to the **central question**. If the current message is feedback, explain how you will revise to address it.
 
 **Execution modes:**
 - If AM provided `am_action_sequence`, you may return a matching `action_sequence` (2–5 steps). Otherwise, return a single `action` that MUST match `am_next_action_type`.
@@ -110,7 +110,7 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 
 SYSTEM_AM_REVIEW = """
 You are the AM Reviewer. Given CEO question(s), AM plan, DS action(s), and lightweight result meta (shapes/samples/metrics),
-write a short plain-language summary for the CEO and critique suitability. Be mindful of the central question and whether the latest response was a follow‑up.
+write a short plain-language summary for the CEO and critique suitability. Be mindful of the central question and whether the latest response was a follow-up.
 Return JSON fields:
 - summary_for_ceo: 2–4 sentences in plain language
 - appropriateness_check: brief assessment of method/query suitability
@@ -128,6 +128,14 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 SYSTEM_REVIEW = """
 You are a Coordinator. Produce a concise revision directive for AM & DS when CEO gives feedback.
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
+"""
+
+# Minimal column-mapper so build_column_hints doesn't NameError
+SYSTEM_COLMAP = """
+You are a column mapper. Given {tables} (table -> columns) and a business question,
+suggest likely columns for common business terms and up to 10 suggested features.
+Return JSON: { "term_to_columns": {term: [{"table": "...","column":"..."}]}, "suggested_features":[{"table":"...","column":"..."}], "notes": "..." }
+Return ONLY a single JSON object (json).
 """
 
 SYSTEM_INTENT = """
@@ -359,7 +367,7 @@ def build_column_hints(question: str) -> dict:
             if found:
                 hints["term_to_columns"][term] = found[:5]
                 hints["suggested_features"].extend(found[:3])
-    # LLM refinement
+    # LLM refinement (best-effort; safe even if model returns nothing)
     try:
         payload = {"question": question, "tables": struct}
         res = llm_json(SYSTEM_COLMAP, json.dumps(payload)) or {}
@@ -390,9 +398,14 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
 
     # ---- Clustering ----
     if task == "clustering":
-        use_cols = features if features else [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        # Use only valid numeric features; if none given, fall back to all numeric
+        proposed = [c for c in (features or []) if c in df.columns]
+        use_cols = [c for c in proposed if pd.api.types.is_numeric_dtype(df[c])]
+        if not use_cols:
+            use_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         if not use_cols:
             return {"error": "No numeric features available for clustering."}
+
         X = df[use_cols].copy()
         scaler = StandardScaler()
         Xs = scaler.fit_transform(X)
@@ -425,7 +438,8 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
     if target is None or target not in df.columns:
         return {"error": f"Target '{target}' not found."}
 
-    X = df[features] if features else df.drop(columns=[target], errors="ignore")
+    valid_features = [c for c in (features or []) if c in df.columns and c != target]
+    X = df[valid_features] if valid_features else df.drop(columns=[target], errors="ignore")
     y = df[target]
 
     num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
@@ -457,14 +471,14 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
             model = LinearRegression()
             fam = "linear_regression"
 
-    pipe = Pipeline([( "pre", pre), ("model", model)])
+    pipe = Pipeline([("pre", pre), ("model", model)])
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.25, random_state=42, stratify=y if task == "classification" else None
     )
     pipe.fit(X_train, y_train)
     y_pred = pipe.predict(X_test)
 
-    base_report = {"task": task, "target": target, "features": features, "model_family": fam}
+    base_report = {"task": task, "target": target, "features": valid_features if valid_features else list(X.columns), "model_family": fam}
 
     if task == "classification":
         try:
