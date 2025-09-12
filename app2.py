@@ -140,10 +140,21 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 """
 
 SYSTEM_DS_REVISE = """
-You are the Data Scientist (DS). Revise your prior plan/output based on AM critique **and the central question**. When feedback is provided, make the revision address that feedback while still serving the central question.
-- Keep to ONLY existing tables/columns.
-- Fix suitability issues AM mentioned.
-- Keep it concise and executable.
+You are the Data Scientist (DS). Revise your prior plan/output based on AM critique, Judge Agent feedback, and the central question.
+
+Key revision priorities:
+- Address AM critique about technical suitability 
+- Address Judge Agent feedback about question alignment and quality issues
+- Ensure your response actually solves the user's original question
+- Keep to ONLY existing tables/columns
+- Fix any issues with unclear or meaningless results (e.g., cluster labels that don't differentiate)
+
+If Judge feedback indicates poor cluster differentiation, consider:
+- Using different features or preprocessing
+- Changing number of clusters
+- Adding better interpretability methods
+- Providing more meaningful comparisons between groups
+
 Return JSON with the SAME schema you use normally.
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
@@ -183,6 +194,31 @@ Decide two things:
 2) related_to_central: true|false
 
 Return ONLY a single JSON object like {"intent": "...", "related_to_central": true/false}. The word "json" is present here to satisfy the API requirement.
+"""
+
+SYSTEM_JUDGE = """
+You are the **Judge Agent** - the quality assurance specialist reviewing AM and DS work.
+
+Your focused responsibilities:
+1. Review AM plans and DS execution to ensure they address the user's actual question
+2. Validate that DS selects correct tables and columns from the available schema
+
+Return ONLY valid JSON:
+{
+  "judgment": "approved/needs_revision/rejected",
+  "addresses_user_question": true/false,
+  "user_question_analysis": "what the user actually asked vs what was delivered",
+  "table_validation": {
+    "ds_table_selection_correct": true/false,
+    "missing_relevant_tables": ["table_name1", "table_name2"],
+    "incorrect_columns_used": ["col1", "col2"],
+    "suggested_tables": ["recommended_table1", "recommended_table2"],
+    "suggested_columns": ["recommended_col1", "recommended_col2"]
+  },
+  "quality_issues": ["issue1", "issue2"],
+  "revision_notes": "specific actionable feedback for AM and DS to better address the user's question"
+}
+Return only one JSON object (json).
 """
 
 SYSTEM_COLMAP = """
@@ -766,6 +802,18 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     return ds_json
 
 
+def judge_review(user_question: str, am_response: dict, ds_response: dict, tables_schema: dict) -> dict:
+    """Judge agent reviews AM and DS work for quality and correctness."""
+    judge_payload = {
+        "user_question": user_question,
+        "am_response": am_response,
+        "ds_response": ds_response,
+        "available_tables": tables_schema,
+        "central_question": st.session_state.central_question,
+        "prior_questions": st.session_state.prior_questions
+    }
+    return llm_json(SYSTEM_JUDGE, json.dumps(judge_payload))
+
 def am_review(ceo_prompt: str, ds_json: dict, meta: dict) -> dict:
     bundle = {"ceo_question": ceo_prompt,
               "am_plan": st.session_state.last_am_json,
@@ -1039,17 +1087,60 @@ def render_final_for_action(ds_step: dict):
             st.json(ctx.get("cluster_sizes") or {})
             if ctx.get("centroids"):
                 st.markdown("**Centroids (original units):**")
-                st.dataframe(pd.DataFrame(ctx["centroids"]))
+                cdf = pd.DataFrame(ctx["centroids"])
+                st.dataframe(cdf)
+                
+                # Better cluster differentiation logic
                 try:
-                    cdf = pd.DataFrame(ctx["centroids"])
+                    st.markdown("**Cluster Characteristics (relative differences):**")
+                    
+                    # Calculate relative differences from overall mean
+                    overall_means = cdf.mean()
+                    relative_diffs = cdf.subtract(overall_means, axis=1)
+                    
+                    bullets = []
+                    for i, row in relative_diffs.iterrows():
+                        # Find features that are meaningfully different (>0.5 std dev)
+                        std_threshold = relative_diffs.std().mean() * 0.5
+                        
+                        high_features = []
+                        low_features = []
+                        
+                        for col in row.index:
+                            if row[col] > std_threshold:
+                                high_features.append(f"{col} (+{row[col]:.1f})")
+                            elif row[col] < -std_threshold:
+                                low_features.append(f"{col} ({row[col]:.1f})")
+                        
+                        # Create meaningful labels
+                        cluster_desc = f"Cluster {i} ({ctx.get('cluster_sizes', {}).get(str(i), '?')} products):"
+                        if high_features:
+                            cluster_desc += f" HIGH {', '.join(high_features)}"
+                        if low_features:
+                            cluster_desc += f" LOW {', '.join(low_features)}"
+                        if not high_features and not low_features:
+                            cluster_desc += " AVERAGE dimensions"
+                            
+                        bullets.append(cluster_desc)
+                    
+                    for b in bullets: st.write(f"• {b}")
+                    
+                    # Add size-based interpretation
+                    st.markdown("**Size-based interpretation:**")
+                    sizes = ctx.get('cluster_sizes', {})
+                    for cluster_id, size in sizes.items():
+                        centroid_values = cdf.loc[int(cluster_id)]
+                        avg_volume = centroid_values.get('product_length_cm', 0) * centroid_values.get('product_width_cm', 0) * centroid_values.get('product_height_cm', 0)
+                        st.write(f"• Cluster {cluster_id}: {size:,} products, avg volume ≈ {avg_volume:.0f} cm³")
+                        
+                except Exception as e:
+                    st.error(f"Enhanced labeling failed: {e}")
+                    # Fallback to original logic
                     bullets = []
                     for i, row in cdf.iterrows():
                         top = row.sort_values(ascending=False).head(min(3, len(row))).index.tolist()
                         bullets.append(f"- Cluster {i}: high on {', '.join(top)}")
-                    st.markdown("**Heuristic labels:**")
                     for b in bullets: st.write(b)
-                except Exception:
-                    pass
             st.markdown("**Next:** Join clusters back to sales/margin/shipping for pricing & ops.")
         elif cache.get("modeling"):
             m = cache["modeling"]
@@ -1226,6 +1317,34 @@ def run_turn_ceo(new_text: str):
         loop_count += 1
 
         meta = _build_metas(ds_json)
+        
+        # Judge Agent Review
+        tables_schema = {k: list(v.columns) for k, v in get_all_tables().items()}
+        judge_result = judge_review(effective_q, am_json, ds_json, tables_schema)
+        
+        # If judge finds critical issues, flag them
+        if judge_result.get("judgment") in ["needs_revision", "rejected"]:
+            st.warning("⚖️ Judge Agent found issues with the approach")
+            with st.expander("Judge Feedback", expanded=True):
+                if not judge_result.get("addresses_user_question", True):
+                    st.error("❌ Response does not address the user's actual question")
+                    st.write(judge_result.get("user_question_analysis", "No analysis provided"))
+                
+                quality_issues = judge_result.get("quality_issues", [])
+                if quality_issues:
+                    st.write("**Quality Issues:**")
+                    for issue in quality_issues:
+                        st.write(f"• {issue}")
+                
+                if judge_result.get("revision_notes"):
+                    st.write("**Judge Recommendations:**")
+                    st.write(judge_result.get("revision_notes"))
+        
+        add_msg("judge", f"Quality Assessment: {judge_result.get('judgment', 'Unknown')}", 
+                artifacts=judge_result)
+        render_chat()
+        
+        # AM Review  
         review = am_review(effective_q, ds_json, {"meta": meta, "mode": "multi" if ds_json.get("action_sequence") else "single"})
         add_msg("am", review.get("summary_for_ceo",""), artifacts={
             "appropriateness_check": review.get("appropriateness_check"),
@@ -1244,14 +1363,23 @@ def run_turn_ceo(new_text: str):
                 add_msg("am", f"• {q}")
             render_chat(); return
 
-        # If sufficient and no revision required → render final and exit
-        if review.get("sufficient_to_answer") and not review.get("must_revise"):
+        # If sufficient and no revision required AND judge approves → render final and exit
+        judge_needs_revision = judge_result.get("judgment") in ["needs_revision", "rejected"]
+        if review.get("sufficient_to_answer") and not review.get("must_revise") and not judge_needs_revision:
             _render(ds_json)
             return
 
-        # Otherwise revise if requested
-        if review.get("must_revise"):
-            ds_json = revise_ds(am_json, ds_json, review, col_hints, thread_ctx)
+        # Otherwise revise if requested by AM or Judge
+        if review.get("must_revise") or judge_needs_revision:
+            # Include judge feedback in revision
+            enhanced_review = dict(review)
+            if judge_needs_revision:
+                enhanced_review["judge_feedback"] = {
+                    "quality_issues": judge_result.get("quality_issues", []),
+                    "revision_notes": judge_result.get("revision_notes", ""),
+                    "user_question_analysis": judge_result.get("user_question_analysis", "")
+                }
+            ds_json = revise_ds(am_json, ds_json, enhanced_review, col_hints, thread_ctx)
             if ds_json.get("action_sequence"):
                 ds_json["action_sequence"] = _normalize_sequence(
                     ds_json.get("action_sequence"),
