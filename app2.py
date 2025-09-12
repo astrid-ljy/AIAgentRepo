@@ -325,7 +325,8 @@ Input includes:
 - **Revision 1**: General feedback about missing functionality
 - **Revision 2**: Specific implementation steps and examples
 - **Revision 3**: Detailed code-level instructions with exact SQL/methods
-- **Revision 4+**: Consider rejecting if no progress made
+- **Revision 4+**: If DS has valid results but Judge disagrees on interpretation, consider `needs_clarification`
+- **Anti-Loop Protection**: If same quality issue appears 2+ times and DS results are technically correct, detect potential interpretation conflict
 
 **Context Validation:**
 - **Only when applicable**: Verify DS used correct entity IDs from shared_context.key_findings
@@ -344,15 +345,23 @@ Input includes:
 - Validate that text processing actually occurred, not just data retrieval
 - Check if results include actual keywords with frequencies
 
+**AMBIGUOUS TERMS DETECTION:**
+When agents have different interpretations of terms like "top selling" (revenue vs quantity), "best" (various metrics), "most popular" (sales vs reviews):
+- **DO NOT force one interpretation over another**
+- **Detect the ambiguity** and recommend asking user for clarification
+- Set `judgment: "needs_clarification"` instead of `needs_revision`
+- Include clarification questions in response
+
 **IMPORTANT - Do NOT flag as quality issues:**
 - Missing cached results when `context_assessment.should_use_cached = false`
 - Missing entity continuity when `context_assessment.requires_entity_continuity = false`  
 - Lack of cached result usage for overview questions (`is_overview_question = true`)
 - Missing entity IDs for first questions (`is_first_question = true`)
+- Different valid interpretations of ambiguous terms (revenue vs quantity for "top selling")
 
 Return ONLY valid JSON:
 {
-  "judgment": "approved/needs_revision/rejected",
+  "judgment": "approved/needs_revision/rejected/needs_clarification",
   "addresses_user_question": true/false,
   "user_question_analysis": "what the user actually asked vs what was delivered",
   "revision_analysis": {
@@ -385,6 +394,8 @@ Return ONLY valid JSON:
   "quality_issues": ["issue1", "issue2"],
   "revision_notes": "PROGRESSIVE: detailed, escalating feedback based on revision attempt number",
   "implementation_guidance": "specific step-by-step instructions when revision_number >= 2",
+  "clarification_questions": ["question1", "question2"],
+  "ambiguity_detected": true/false,
   "can_display": true/false
 }
 Return only one JSON object (json).
@@ -1922,13 +1933,23 @@ def judge_review(user_question: str, am_response: dict, ds_response: dict, table
     ])
     has_cached_results = len(shared_context.get("key_findings", [])) > 0
     
+    # Check for repeated quality issues (anti-loop protection)
+    revision_history = st.session_state.revision_history
+    repeated_issues = []
+    if len(revision_history) >= 2:
+        recent_issues = [rev.get("quality_issues", []) for rev in revision_history[-2:]]
+        if recent_issues[0] and recent_issues[1]:
+            repeated_issues = list(set(recent_issues[0]) & set(recent_issues[1]))
+    
     context_assessment = {
         "is_overview_question": is_overview_question,
         "is_first_question": is_first_question,
         "has_contextual_reference": has_contextual_reference,
         "has_cached_results": has_cached_results,
         "requires_entity_continuity": has_contextual_reference and has_cached_results,
-        "should_use_cached": has_cached_results and not is_overview_question and has_contextual_reference
+        "should_use_cached": has_cached_results and not is_overview_question and has_contextual_reference,
+        "repeated_issues": repeated_issues,
+        "potential_loop": len(repeated_issues) > 0 and current_revision >= 3
     }
     
     judge_payload = {
@@ -2572,6 +2593,23 @@ def run_turn_ceo(new_text: str):
         # If sufficient and no revision required AND judge approves → render final and exit
         judge_approved = judge_result.get("judgment") == "approved" and judge_result.get("can_display", False)
         judge_needs_revision = judge_result.get("judgment") in ["needs_revision", "rejected"]
+        judge_needs_clarification = judge_result.get("judgment") == "needs_clarification"
+        
+        # Handle clarification requests - ask user to clarify ambiguous terms
+        if judge_needs_clarification:
+            add_msg("system", "🤔 Clarification Needed")
+            add_msg("system", "I notice there might be different ways to interpret your question:")
+            
+            clarification_questions = judge_result.get("clarification_questions", [])
+            if clarification_questions:
+                for q in clarification_questions:
+                    add_msg("system", f"• {q}")
+            else:
+                add_msg("system", "• Could you clarify what specific metric you'd like to see?")
+                
+            add_msg("system", "Please let me know which interpretation you prefer, and I'll provide the exact analysis you need.")
+            render_chat()
+            return
         
         if review.get("sufficient_to_answer") and not review.get("must_revise") and judge_approved:
             # Hide judge feedback if approved to keep conversation clean
