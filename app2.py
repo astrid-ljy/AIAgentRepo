@@ -321,6 +321,11 @@ Input includes:
 - Available table schemas
 - `context_assessment`: Automated assessment of question type and context requirements
 
+**CRITICAL - FOCUS ON CURRENT DS RESPONSE:**
+- **Review ONLY the current `ds_response`, NOT previous revision_history**
+- **Validate the actual SQL in the current DS response, ignore old failed attempts**
+- **Check if current SQL executes successfully in `executed_results`**
+
 **Revision Tracking & Progressive Feedback:**
 - **Revision 1**: General feedback about missing functionality
 - **Revision 2**: Specific implementation steps and examples
@@ -1264,10 +1269,21 @@ def extract_entity_ids_from_results(query_results: dict, entity_types: List[str]
     """Extract actual entity IDs from SQL query results."""
     extracted_ids = {}
     
+    if not query_results or not isinstance(query_results, dict):
+        return extracted_ids
+    
     for result_key, result_data in query_results.items():
+        # Handle case where result_data is None or not a dict
+        if not result_data or not isinstance(result_data, dict):
+            continue
+            
         sample_data = result_data.get("sample_data", [])
         if sample_data and isinstance(sample_data, list) and len(sample_data) > 0:
             first_row = sample_data[0]
+            
+            # Ensure first_row is a dict
+            if not isinstance(first_row, dict):
+                continue
             
             # Look for entity IDs in the result data
             for entity_type in entity_types:
@@ -1304,7 +1320,13 @@ def resolve_contextual_entities(current_question: str, conversation_history: Lis
         all_sql_results.update(cached_results.get("sql", {}))
     
     # Extract IDs from results
-    resolved_ids = extract_entity_ids_from_results(all_sql_results, entity_types_to_find)
+    try:
+        resolved_ids = extract_entity_ids_from_results(all_sql_results, entity_types_to_find)
+    except Exception as e:
+        # If entity extraction fails, return empty resolved_ids to prevent crashes
+        resolved_ids = {}
+        if st.session_state.get("debug_judge", False):
+            st.warning(f"Entity ID extraction failed: {str(e)}")
     
     return {
         "current_entities": current_entities,
