@@ -10,6 +10,21 @@ import pandas as pd
 import duckdb
 import streamlit as st
 
+# NLP libraries for Spanish comment analysis
+try:
+    from textblob import TextBlob
+    _TEXTBLOB_AVAILABLE = True
+except ImportError:
+    _TEXTBLOB_AVAILABLE = False
+
+try:
+    import nltk
+    from nltk.corpus import stopwords
+    from nltk.tokenize import word_tokenize
+    _NLTK_AVAILABLE = True
+except ImportError:
+    _NLTK_AVAILABLE = False
+
 
 # === DS ARTIFACT CACHE (light) ===
 import hashlib
@@ -227,6 +242,296 @@ Inputs: {"question": str, "tables": {table: [columns...]}}
 Return JSON: { "term_to_columns": {term: [{table, column}]}, "suggested_features": [{table, column}], "notes": "" }.
 Return only one JSON object (json).
 """
+
+# ======================
+# Spanish Comment Analysis Functions
+# ======================
+
+def analyze_spanish_sentiment(comment: str) -> Dict[str, Any]:
+    """
+    Analyze sentiment of Spanish comment text.
+    Returns sentiment polarity, subjectivity, and classification.
+    """
+    if not comment or not isinstance(comment, str):
+        return {
+            "polarity": 0.0,
+            "subjectivity": 0.0, 
+            "sentiment_label": "neutral",
+            "confidence": 0.0,
+            "error": "Invalid or empty comment"
+        }
+    
+    if not _TEXTBLOB_AVAILABLE:
+        # Fallback: simple keyword-based sentiment for Spanish
+        positive_words = ["bueno", "excelente", "genial", "perfecto", "increíble", "fantástico", 
+                         "recomiendo", "satisfecho", "contento", "feliz", "amor", "mejor"]
+        negative_words = ["malo", "terrible", "horrible", "pésimo", "odio", "peor", 
+                         "decepcionado", "frustrado", "enojado", "lento", "caro", "defectuoso"]
+        
+        comment_lower = comment.lower()
+        pos_count = sum(1 for word in positive_words if word in comment_lower)
+        neg_count = sum(1 for word in negative_words if word in comment_lower)
+        
+        if pos_count > neg_count:
+            polarity = 0.5
+            label = "positive"
+        elif neg_count > pos_count:
+            polarity = -0.5
+            label = "negative"
+        else:
+            polarity = 0.0
+            label = "neutral"
+            
+        return {
+            "polarity": polarity,
+            "subjectivity": 0.5,
+            "sentiment_label": label,
+            "confidence": abs(polarity),
+            "method": "keyword_fallback"
+        }
+    
+    try:
+        # Use TextBlob for sentiment analysis
+        blob = TextBlob(comment)
+        polarity = blob.sentiment.polarity  # -1 (negative) to 1 (positive)
+        subjectivity = blob.sentiment.subjectivity  # 0 (objective) to 1 (subjective)
+        
+        # Classify sentiment
+        if polarity > 0.1:
+            sentiment_label = "positive"
+        elif polarity < -0.1:
+            sentiment_label = "negative"
+        else:
+            sentiment_label = "neutral"
+            
+        return {
+            "polarity": float(polarity),
+            "subjectivity": float(subjectivity),
+            "sentiment_label": sentiment_label,
+            "confidence": abs(float(polarity)),
+            "method": "textblob"
+        }
+    except Exception as e:
+        return {
+            "polarity": 0.0,
+            "subjectivity": 0.0,
+            "sentiment_label": "neutral",
+            "confidence": 0.0,
+            "error": str(e)
+        }
+
+
+def extract_ecommerce_keywords(comment: str) -> Dict[str, List[str]]:
+    """
+    Extract themed keywords from Spanish comments related to e-commerce.
+    Categories: product, shipment, service, price, quality.
+    """
+    if not comment or not isinstance(comment, str):
+        return {"product": [], "shipment": [], "service": [], "price": [], "quality": []}
+    
+    comment_lower = comment.lower()
+    
+    # Spanish e-commerce keyword categories
+    keywords = {
+        "product": {
+            "terms": ["producto", "artículo", "item", "mercancía", "objeto", "cosa", "material", 
+                     "calidad", "tamaño", "color", "diseño", "modelo", "marca", "características"],
+            "found": []
+        },
+        "shipment": {
+            "terms": ["envío", "entrega", "paquete", "correo", "transporte", "llegada", "recibir", 
+                     "delivery", "shipping", "rápido", "lento", "tarde", "tiempo", "días"],
+            "found": []
+        },
+        "service": {
+            "terms": ["servicio", "atención", "soporte", "ayuda", "personal", "vendedor", "cliente",
+                     "respuesta", "comunicación", "trato", "amable", "profesional"],
+            "found": []
+        },
+        "price": {
+            "terms": ["precio", "costo", "dinero", "barato", "caro", "económico", "oferta", 
+                     "descuento", "valor", "pagar", "euro", "dólar", "peso"],
+            "found": []
+        },
+        "quality": {
+            "terms": ["calidad", "bueno", "malo", "excelente", "terrible", "perfecto", "defectuoso",
+                     "resistente", "frágil", "duradero", "funciona", "roto", "dañado"],
+            "found": []
+        }
+    }
+    
+    # Extract matching keywords
+    for category, data in keywords.items():
+        for term in data["terms"]:
+            if term in comment_lower:
+                data["found"].append(term)
+    
+    # Return only the found keywords
+    return {category: data["found"] for category, data in keywords.items()}
+
+
+def translate_spanish_to_english(text: str) -> Dict[str, Any]:
+    """
+    Translate Spanish text to English using available libraries.
+    """
+    if not text or not isinstance(text, str):
+        return {
+            "original": text,
+            "translated": "",
+            "success": False,
+            "error": "Invalid or empty text"
+        }
+    
+    if not _TEXTBLOB_AVAILABLE:
+        # Simple fallback dictionary for common Spanish phrases
+        common_translations = {
+            "muy bueno": "very good",
+            "excelente": "excellent", 
+            "malo": "bad",
+            "terrible": "terrible",
+            "recomiendo": "I recommend",
+            "no recomiendo": "I don't recommend",
+            "rápido": "fast",
+            "lento": "slow",
+            "caro": "expensive",
+            "barato": "cheap",
+            "producto": "product",
+            "envío": "shipping",
+            "servicio": "service",
+            "calidad": "quality"
+        }
+        
+        text_lower = text.lower().strip()
+        if text_lower in common_translations:
+            return {
+                "original": text,
+                "translated": common_translations[text_lower],
+                "success": True,
+                "method": "dictionary_fallback"
+            }
+        else:
+            return {
+                "original": text,
+                "translated": f"[ES] {text}",
+                "success": False,
+                "method": "dictionary_fallback",
+                "note": "Translation not found in dictionary"
+            }
+    
+    try:
+        # Use TextBlob for translation
+        blob = TextBlob(text)
+        # Detect language first
+        detected_lang = blob.detect_language()
+        
+        if detected_lang == 'es':
+            translated = str(blob.translate(to='en'))
+            return {
+                "original": text,
+                "translated": translated,
+                "success": True,
+                "detected_language": detected_lang,
+                "method": "textblob"
+            }
+        else:
+            # If not Spanish, return as-is
+            return {
+                "original": text,
+                "translated": text,
+                "success": True,
+                "detected_language": detected_lang,
+                "method": "textblob",
+                "note": "Text not detected as Spanish"
+            }
+    except Exception as e:
+        return {
+            "original": text,
+            "translated": f"[Translation Error] {text}",
+            "success": False,
+            "error": str(e)
+        }
+
+
+def analyze_spanish_comments(comments: Union[str, List[str]]) -> Dict[str, Any]:
+    """
+    Main function to analyze Spanish review comments.
+    Performs sentiment analysis, keyword extraction, and translation.
+    
+    Args:
+        comments: Single comment string or list of comment strings
+        
+    Returns:
+        Dictionary with analysis results including sentiment, keywords, and translations
+    """
+    if isinstance(comments, str):
+        comments = [comments]
+    
+    if not comments or not isinstance(comments, list):
+        return {
+            "error": "Invalid input: expected string or list of strings",
+            "total_comments": 0,
+            "results": []
+        }
+    
+    results = []
+    sentiment_summary = {"positive": 0, "negative": 0, "neutral": 0}
+    all_keywords = {"product": [], "shipment": [], "service": [], "price": [], "quality": []}
+    
+    for i, comment in enumerate(comments):
+        if not comment or not isinstance(comment, str):
+            continue
+            
+        # Sentiment analysis
+        sentiment = analyze_spanish_sentiment(comment)
+        sentiment_summary[sentiment["sentiment_label"]] += 1
+        
+        # Keyword extraction
+        keywords = extract_ecommerce_keywords(comment)
+        for category, terms in keywords.items():
+            all_keywords[category].extend(terms)
+        
+        # Translation
+        translation = translate_spanish_to_english(comment)
+        
+        # Compile result for this comment
+        comment_result = {
+            "comment_index": i,
+            "original_comment": comment,
+            "sentiment": sentiment,
+            "keywords": keywords,
+            "translation": translation,
+            "translated_text": translation.get("translated", comment)
+        }
+        
+        results.append(comment_result)
+    
+    # Remove duplicates from aggregated keywords
+    for category in all_keywords:
+        all_keywords[category] = list(set(all_keywords[category]))
+    
+    # Calculate overall sentiment distribution
+    total_analyzed = sum(sentiment_summary.values())
+    sentiment_distribution = {}
+    if total_analyzed > 0:
+        sentiment_distribution = {
+            k: round(v / total_analyzed * 100, 1) 
+            for k, v in sentiment_summary.items()
+        }
+    
+    return {
+        "total_comments": len([c for c in comments if c and isinstance(c, str)]),
+        "sentiment_summary": sentiment_summary,
+        "sentiment_distribution_pct": sentiment_distribution,
+        "aggregated_keywords": all_keywords,
+        "most_common_themes": sorted(
+            all_keywords.items(), 
+            key=lambda x: len(x[1]), 
+            reverse=True
+        )[:3],
+        "results": results,
+        "analysis_complete": True
+    }
+
 
 # ======================
 # Streamlit config
