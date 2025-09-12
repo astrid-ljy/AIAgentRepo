@@ -319,6 +319,7 @@ Input includes:
 - DS response with actual SQL and executed results
 - `revision_history`: Previous revision attempts and feedback
 - Available table schemas
+- `context_assessment`: Automated assessment of question type and context requirements
 
 **Revision Tracking & Progressive Feedback:**
 - **Revision 1**: General feedback about missing functionality
@@ -327,15 +328,27 @@ Input includes:
 - **Revision 4+**: Consider rejecting if no progress made
 
 **Context Validation:**
-- Verify DS used correct entity IDs from shared_context.key_findings
-- Check if cached results were properly leveraged to avoid redundant queries
-- Validate entity continuity (e.g., "this product" should use specific product_id from context)
-- Ensure new queries build logically on previous results
+- **Only when applicable**: Verify DS used correct entity IDs from shared_context.key_findings
+- **Only when cached results exist**: Check if cached results were properly leveraged to avoid redundant queries
+- **Only for follow-up questions**: Validate entity continuity (e.g., "this product" should use specific product_id from context)
+- **Only for sequential questions**: Ensure new queries build logically on previous results
+
+**Question Type Assessment (use context_assessment input):**
+- **Overview/Exploratory questions** (`is_overview_question=true`): No cached results or entity continuity required
+- **First question in conversation** (`is_first_question=true`): No cached results or entity continuity expected
+- **Questions with contextual references** (`has_contextual_reference=true`): Must use specific IDs from shared context
+- **Use context_assessment.requires_entity_continuity and context_assessment.should_use_cached to determine validation requirements**
 
 **Special Case - Keyword Extraction:**
 - For keyword requests, DS must use multi-step approach: SQL + keyword_extraction action
 - Validate that text processing actually occurred, not just data retrieval
 - Check if results include actual keywords with frequencies
+
+**IMPORTANT - Do NOT flag as quality issues:**
+- Missing cached results when `context_assessment.should_use_cached = false`
+- Missing entity continuity when `context_assessment.requires_entity_continuity = false`  
+- Lack of cached result usage for overview questions (`is_overview_question = true`)
+- Missing entity IDs for first questions (`is_first_question = true`)
 
 Return ONLY valid JSON:
 {
@@ -350,7 +363,9 @@ Return ONLY valid JSON:
   },
   "context_validation": {
     "shared_context_used": true/false,
-    "entity_continuity_correct": true/false,
+    "entity_continuity_required": true/false,
+    "entity_continuity_correct": true/false,  
+    "cached_results_available": true/false,
     "cached_results_leveraged": true/false,
     "redundant_queries_avoided": true/false
   },
@@ -1896,6 +1911,26 @@ def judge_review(user_question: str, am_response: dict, ds_response: dict, table
     
     shared_context = build_shared_context()
     
+    # Assess question context for Judge evaluation
+    question_lower = user_question.lower()
+    is_overview_question = any(phrase in question_lower for phrase in [
+        "what data", "data available", "datasets", "overview", "show me", "available"
+    ])
+    is_first_question = len(st.session_state.revision_history) == 0 and len(shared_context.get("key_findings", [])) == 0
+    has_contextual_reference = any(ref in question_lower for ref in [
+        "this", "that", "the customer", "the product", "the order"
+    ])
+    has_cached_results = len(shared_context.get("key_findings", [])) > 0
+    
+    context_assessment = {
+        "is_overview_question": is_overview_question,
+        "is_first_question": is_first_question,
+        "has_contextual_reference": has_contextual_reference,
+        "has_cached_results": has_cached_results,
+        "requires_entity_continuity": has_contextual_reference and has_cached_results,
+        "should_use_cached": has_cached_results and not is_overview_question and has_contextual_reference
+    }
+    
     judge_payload = {
         "user_question": user_question,
         "shared_context": shared_context,
@@ -1905,6 +1940,7 @@ def judge_review(user_question: str, am_response: dict, ds_response: dict, table
         "revision_history": st.session_state.revision_history,
         "current_revision_number": current_revision,
         "available_tables": tables_schema,
+        "context_assessment": context_assessment,
     }
     
     return llm_json(SYSTEM_JUDGE, json.dumps(judge_payload))
