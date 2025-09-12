@@ -1228,6 +1228,79 @@ ENTITY_SCHEMA = {
     }
 }
 
+import hashlib
+
+def _sql_fingerprint(ds_response: dict) -> str:
+    parts = []
+    if ds_response.get("action") == "sql":
+        parts.append(ds_response.get("duckdb_sql") or "")
+    for step in (ds_response.get("action_sequence") or []):
+        if step.get("action") == "sql":
+            parts.append(step.get("duckdb_sql") or "")
+    blob = "\n--SEP--\n".join([p.strip() for p in parts if p])
+    return hashlib.md5(blob.encode()).hexdigest() if blob else "NO_SQL"
+
+# When you queue a revision, store the fingerprint:
+current_fp = _sql_fingerprint(ds_response)
+st.session_state.last_review_fp = getattr(st.session_state, "last_review_fp", None)
+
+# Inside judge_review() *before* creating feedback:
+if st.session_state.last_review_fp == current_fp:
+    # Same SQL as last time → OK to consider repeated issues
+    pass
+else:
+    # New SQL → clear any “sticky” issues
+    st.session_state.revision_history = [
+        r for r in st.session_state.revision_history
+        if r.get("sql_fp") != current_fp
+    ]
+st.session_state.last_review_fp = current_fp
+
+
+
+# NEW: lightweight SQL schema precheck and auto-repair
+def precheck_and_repair_sql(sql: str, duck) -> Tuple[str, List[str]]:
+    """
+    Validate that referenced tables/columns exist. If a known 'quantity' column
+    is missing on olist_order_items_dataset, auto-repair to SUM(price) or COUNT(*).
+    Returns (possibly_repaired_sql, issues)
+    """
+    issues = []
+    norm = (sql or "").strip().lower()
+    if not norm.startswith("select"):
+        return sql, issues
+
+    # Known Olist schema (minimal)
+    OLIST_TABLE_COLS = {
+        "olist_order_items_dataset": {"order_id","order_item_id","product_id","seller_id","shipping_limit_date","price","freight_value"},
+        "olist_orders_dataset": {"order_id","customer_id","order_status","order_purchase_timestamp","order_approved_at","order_delivered_carrier_date","order_delivered_customer_date"},
+        "olist_products_dataset": {"product_id","product_category_name","product_name_lenght","product_description_lenght","product_photos_qty","product_weight_g","product_length_cm","product_height_cm","product_width_cm"},
+        "product_category_name_translation": {"product_category_name","product_category_name_english"},
+    }
+
+    # naive parse (good enough for guardrails)
+    tables = []
+    for t in [" from ", " join "]:
+        parts = norm.split(t)[1:] if t in norm else []
+        for p in parts:
+            name = re.split(r"\s|,|\n", p, 1)[0]
+            name = name.strip()
+            if name in OLIST_TABLE_COLS and name not in tables:
+                tables.append(name)
+
+    # Column spot-checks on the common failure path
+    if "olist_order_items_dataset" in tables:
+        if ".quantity" in norm or " quantity" in norm:
+            # There is no quantity column on order_items; repair
+            issues.append("quantity_missing_on_order_items")
+            # Prefer revenue by default (business-friendly)
+            sql = re.sub(r"\bprice\s*\*\s*quantity\b", "price", sql, flags=re.I)
+            sql = re.sub(r"\bsum\(\s*quantity\s*\)\b", "count(*)", sql, flags=re.I)
+            sql = re.sub(r"\bquantity\b", "1", sql, flags=re.I)  # last-resort neutralization
+
+    return sql, issues
+
+
 
 def detect_entity_references(text: str) -> Dict[str, Any]:
     """Dynamically detect entity references in user questions."""
