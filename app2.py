@@ -155,18 +155,21 @@ You are the Data Scientist (DS). Execute the AM plan using shared context and av
 
 **Execution modes:**
 - If AM provided `am_action_sequence`, return matching `action_sequence`. Otherwise, return single `action`
-- Allowed actions: overview, sql, eda, calc, feature_engineering, modeling, explain
+- Allowed actions: overview, sql, eda, calc, feature_engineering, modeling, explain, keyword_extraction
 
-**SQL Requirements:**
-- ALWAYS provide complete, executable SQL queries in duckdb_sql field
+**CRITICAL SQL Requirements:**
+- NEVER return NULL, empty, or missing duckdb_sql values - this is a critical error
+- ALWAYS provide complete, executable SQL queries in duckdb_sql field  
 - Use proper table/column names from schema
 - For entity-specific queries, use exact IDs from shared_context.key_findings
-- Example: "SELECT * FROM products WHERE product_id = 'B003AI2VGA'" (using actual ID from context)
+- Example valid SQL: "SELECT p.product_category_name FROM products p WHERE p.product_id = 'bb50f2e236e5eea0100680137654686c'"
+- Example multi-table: "SELECT c.customer_id, SUM(oi.price * oi.quantity) as total FROM orders o JOIN order_items oi ON o.order_id = oi.order_id JOIN customers c ON o.customer_id = c.customer_id WHERE oi.product_id = 'bb50f2e236e5eea0100680137654686c' GROUP BY c.customer_id ORDER BY total DESC LIMIT 1"
 
 **Special rules:**
 - Data Inventory: Overview with first 5 rows for each table
 - Explain: Read cached results and interpret without recomputing
 - Entity continuity: "this product" MUST use product_id from shared_context.key_findings
+- Keyword Extraction: For review analysis, use multi-step approach: 1) SQL to get reviews, 2) keyword_extraction action to process text
 
 Return JSON fields:
 - ds_summary
@@ -184,22 +187,51 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 """
 
 SYSTEM_DS_REVISE = """
-You are the Data Scientist (DS). Revise your prior plan/output based on AM critique, Judge Agent feedback, and the central question.
+You are the Data Scientist (DS). Revise your prior plan/output based on AM critique, Judge Agent feedback, and shared context.
 
-Key revision priorities:
-- Address AM critique about technical suitability 
-- Address Judge Agent feedback about question alignment and quality issues
-- Ensure your response actually solves the user's original question
-- Keep to ONLY existing tables/columns
-- Fix any issues with unclear or meaningless results (e.g., cluster labels that don't differentiate)
+**Inputs:**
+- Your previous DS response that was rejected
+- AM critique and suggestions
+- Judge Agent feedback with progressive guidance
+- `shared_context`: Complete context with cached results and key findings
+- Revision history and attempt number
 
-If Judge feedback indicates poor cluster differentiation, consider:
-- Using different features or preprocessing
-- Changing number of clusters
-- Adding better interpretability methods
-- Providing more meaningful comparisons between groups
+**Progressive Revision Strategy:**
+- **Revision 1-2**: Focus on core functionality gaps (e.g., missing actual execution, wrong action type)
+- **Revision 3+**: Follow detailed implementation guidance from Judge Agent
+- **Critical**: If Judge provides `implementation_guidance`, follow it exactly
 
-Return JSON with the SAME schema you use normally.
+**Key Revision Priorities:**
+- Address Judge Agent's specific technical instructions first
+- Ensure you actually EXECUTE what the user requested (not just plan it)  
+- For keyword extraction: Use action_sequence with SQL + keyword_extraction actions
+- For "this product" references: Use exact product_id from shared_context.key_findings
+- Address AM critique about business alignment
+
+**Keyword Extraction Fix:**
+If user wants keywords from reviews and Judge indicates this is missing:
+1. Use action_sequence with two steps:
+2. Step 1: "sql" action to get review data using product_id from shared context
+3. Step 2: "keyword_extraction" action to process the text
+4. Provide BOTH duckdb_sql for data retrieval AND keyword_extraction action
+
+**Implementation Examples:**
+```json
+{
+  "action_sequence": [
+    {
+      "action": "sql",
+      "duckdb_sql": "SELECT review_comment_message FROM reviews WHERE product_id = '[from_context]'"
+    },
+    {
+      "action": "keyword_extraction",
+      "description": "Extract top 10 keywords from review text"
+    }
+  ]
+}
+```
+
+Return JSON with the SAME schema you use normally, including shared context usage fields.
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
@@ -207,12 +239,18 @@ SYSTEM_AM_REVIEW = """
 You are the AM Reviewer. Given CEO question(s), AM plan, DS action(s), and result meta using shared context,
 write a short plain-language summary for the CEO and critique suitability.
 
+**CRITICAL: NO HALLUCINATION RULE**
+- NEVER make up data, numbers, categories, or customer IDs that aren't in the actual executed results
+- If no actual data was retrieved (e.g., SQL queries failed), explicitly state this
+- Only reference specific values that appear in the result metadata or executed results
+- If results are missing or incomplete, say so directly
+
 **Inputs:**
 - CEO question and conversation history
 - `shared_context`: Complete context with cached results, key findings, and extracted entities
 - AM plan with context awareness
 - DS actions and executed results
-- Result metadata (shapes/samples/metrics)
+- Result metadata (shapes/samples/metrics) - ONLY source of truth for data
 
 **Context-aware review:**
 - Acknowledge when shared context was properly utilized
@@ -221,12 +259,13 @@ write a short plain-language summary for the CEO and critique suitability.
 - Assess if the response builds logically on previous findings
 
 **CEO Communication:**
-- Write summaries that reference specific entities from context (e.g., "Product B003AI2VGA, your top seller...")
-- Connect current results to previous findings when relevant
+- ONLY reference actual data from executed results or cached context
+- If no data was retrieved, state: "The query didn't execute successfully, so I don't have the specific details yet"
+- Connect current results to previous findings when relevant, but only with real data
 - Be mindful if this is a follow-up to previous analysis
 
 Return JSON fields:
-- summary_for_ceo
+- summary_for_ceo (MUST be based on actual results only)
 - appropriateness_check
 - gaps_or_risks
 - improvements
@@ -238,6 +277,7 @@ Return JSON fields:
 - revision_notes
 - context_utilization: "excellent/good/poor/none"
 - entity_continuity_maintained: true/false
+- data_actually_retrieved: true/false
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
@@ -269,14 +309,22 @@ Your focused responsibilities:
 2. Validate SQL queries and results are correct and meaningful using shared context
 3. Verify proper utilization of shared context and cached results
 4. Check entity continuity - ensure "this product/customer" references use correct IDs from shared context
-5. Approve results for display only if they meet quality standards
+5. **PROGRESSIVE REVISION**: Track revision attempts and escalate specificity with each failed attempt
+6. Approve results for display only if they meet quality standards
 
 Input includes:
 - User's question and conversation history
 - `shared_context`: Complete context with cached results, key findings, and extracted entities
 - AM plan with context awareness
 - DS response with actual SQL and executed results
+- `revision_history`: Previous revision attempts and feedback
 - Available table schemas
+
+**Revision Tracking & Progressive Feedback:**
+- **Revision 1**: General feedback about missing functionality
+- **Revision 2**: Specific implementation steps and examples
+- **Revision 3**: Detailed code-level instructions with exact SQL/methods
+- **Revision 4+**: Consider rejecting if no progress made
 
 **Context Validation:**
 - Verify DS used correct entity IDs from shared_context.key_findings
@@ -284,11 +332,22 @@ Input includes:
 - Validate entity continuity (e.g., "this product" should use specific product_id from context)
 - Ensure new queries build logically on previous results
 
+**Special Case - Keyword Extraction:**
+- For keyword requests, DS must use multi-step approach: SQL + keyword_extraction action
+- Validate that text processing actually occurred, not just data retrieval
+- Check if results include actual keywords with frequencies
+
 Return ONLY valid JSON:
 {
   "judgment": "approved/needs_revision/rejected",
   "addresses_user_question": true/false,
   "user_question_analysis": "what the user actually asked vs what was delivered",
+  "revision_analysis": {
+    "revision_number": 1/2/3/4,
+    "progress_made": true/false,
+    "same_issues_repeated": true/false,
+    "escalation_needed": true/false
+  },
   "context_validation": {
     "shared_context_used": true/false,
     "entity_continuity_correct": true/false,
@@ -309,7 +368,8 @@ Return ONLY valid JSON:
     "suggested_columns": ["recommended_col1", "recommended_col2"]
   },
   "quality_issues": ["issue1", "issue2"],
-  "revision_notes": "specific actionable feedback for AM and DS to better address the user's question",
+  "revision_notes": "PROGRESSIVE: detailed, escalating feedback based on revision attempt number",
+  "implementation_guidance": "specific step-by-step instructions when revision_number >= 2",
   "can_display": true/false
 }
 Return only one JSON object (json).
@@ -531,6 +591,71 @@ def translate_spanish_to_english(text: str) -> Dict[str, Any]:
         }
 
 
+def extract_keywords_from_reviews(review_df: pd.DataFrame, text_column: str = "review_comment_message", top_n: int = 10) -> Dict[str, Any]:
+    """
+    Extract top keywords from review text data.
+    Works with Portuguese/Spanish reviews.
+    """
+    if review_df.empty or text_column not in review_df.columns:
+        return {
+            "error": f"No data found or column '{text_column}' missing",
+            "keywords": [],
+            "total_reviews": 0
+        }
+    
+    # Get all review text
+    reviews = review_df[text_column].dropna().tolist()
+    if not reviews:
+        return {
+            "error": "No review text found",
+            "keywords": [],
+            "total_reviews": 0
+        }
+    
+    # Simple keyword extraction for Portuguese/Spanish
+    all_text = " ".join(reviews).lower()
+    
+    # Common Portuguese/Spanish stop words
+    stop_words = {
+        'o', 'a', 'os', 'as', 'um', 'uma', 'uns', 'umas', 'do', 'da', 'dos', 'das', 
+        'de', 'em', 'para', 'por', 'com', 'sem', 'que', 'ou', 'e', 'mas', 'se', 
+        'no', 'na', 'nos', 'nas', 'ao', 'aos', 'à', 'às', 'pelo', 'pela', 'pelos', 
+        'pelas', 'este', 'esta', 'estes', 'estas', 'esse', 'essa', 'esses', 'essas',
+        'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'del', 'al', 'y', 
+        'o', 'pero', 'si', 'no', 'en', 'con', 'sin', 'por', 'para', 'de', 'que',
+        'muito', 'bem', 'bom', 'boa', 'foi', 'ser', 'ter', 'fazer', 'ficar', 'dar',
+        'bueno', 'bien', 'fue', 'ser', 'estar', 'tener', 'hacer', 'dar', 'ir', 'ver'
+    }
+    
+    # Clean and tokenize
+    import string
+    # Remove punctuation and split
+    translator = str.maketrans('', '', string.punctuation)
+    clean_text = all_text.translate(translator)
+    words = clean_text.split()
+    
+    # Filter out stop words and short words
+    keywords = [word for word in words if len(word) > 2 and word not in stop_words]
+    
+    # Count frequency
+    from collections import Counter
+    word_counts = Counter(keywords)
+    
+    # Get top keywords
+    top_keywords = word_counts.most_common(top_n)
+    
+    # Format results
+    keyword_list = [{"keyword": word, "frequency": count} for word, count in top_keywords]
+    
+    return {
+        "keywords": keyword_list,
+        "total_reviews": len(reviews),
+        "total_words_analyzed": len(keywords),
+        "most_common_word": top_keywords[0][0] if top_keywords else None,
+        "analysis_method": "frequency_based"
+    }
+
+
 def analyze_spanish_comments(comments: Union[str, List[str]]) -> Dict[str, Any]:
     """
     Main function to analyze Spanish review comments.
@@ -658,6 +783,10 @@ if "executed_results" not in st.session_state:
 # Cache for SQL query results to avoid re-execution
 if "sql_results_cache" not in st.session_state:
     st.session_state.sql_results_cache = {}  # {sql_hash: dataframe}
+
+# Revision tracking for judge agent
+if "revision_history" not in st.session_state:
+    st.session_state.revision_history = []  # Track DS revisions and judge feedback
 
 # Lightweight business term synonyms
 TERM_SYNONYMS: Dict[str, List[str]] = {
@@ -792,6 +921,38 @@ def get_last_approved_result(action_type: str) -> Optional[Any]:
         if cached.get("approved", False) and action_id.startswith(action_type):
             return cached.get("result")
     return None
+
+
+def validate_ds_response(ds_response: dict) -> Dict[str, Any]:
+    """Validate DS response for critical errors before judge review."""
+    issues = []
+    
+    # Check for NULL SQL queries in single action
+    if ds_response.get("action") == "sql":
+        sql = ds_response.get("duckdb_sql")
+        if sql is None or sql == "NULL" or (isinstance(sql, str) and sql.strip() == ""):
+            issues.append("CRITICAL: SQL action has NULL/empty duckdb_sql field")
+    
+    # Check for NULL SQL queries in action sequence
+    if ds_response.get("action_sequence"):
+        for i, step in enumerate(ds_response.get("action_sequence", [])):
+            if step.get("action") == "sql":
+                sql = step.get("duckdb_sql")
+                if sql is None or sql == "NULL" or (isinstance(sql, str) and sql.strip() == ""):
+                    issues.append(f"CRITICAL: Action sequence step {i+1} has NULL/empty duckdb_sql field")
+    
+    # Check for missing required fields
+    if not ds_response.get("ds_summary"):
+        issues.append("Missing ds_summary field")
+    
+    if not ds_response.get("action") and not ds_response.get("action_sequence"):
+        issues.append("Missing both action and action_sequence fields")
+    
+    return {
+        "valid": len(issues) == 0,
+        "issues": issues,
+        "has_critical_errors": any("CRITICAL:" in issue for issue in issues)
+    }
 
 
 def build_shared_context() -> Dict[str, Any]:
@@ -1293,6 +1454,29 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
 def judge_review(user_question: str, am_response: dict, ds_response: dict, tables_schema: dict, executed_results: dict = None) -> dict:
     """Judge agent reviews AM and DS work AFTER execution for quality and correctness."""
     
+    # Track current revision attempt
+    current_revision = len([r for r in st.session_state.revision_history if r.get("user_question") == user_question]) + 1
+    
+    # Pre-validate DS response for critical errors
+    validation = validate_ds_response(ds_response)
+    if validation["has_critical_errors"]:
+        return {
+            "judgment": "needs_revision",
+            "addresses_user_question": False,
+            "user_question_analysis": "DS response has critical errors that prevent execution",
+            "revision_analysis": {
+                "revision_number": current_revision,
+                "progress_made": False,
+                "same_issues_repeated": True,
+                "escalation_needed": True
+            },
+            "quality_issues": validation["issues"],
+            "revision_notes": f"CRITICAL VALIDATION ERRORS (Revision {current_revision}): " + "; ".join(validation["issues"]) + 
+                            f"\n\nYou MUST provide actual SQL queries, not NULL values. Example for product info: SELECT p.product_category_name FROM products p WHERE p.product_id = '{am_response.get('referenced_entities', {}).get('product_id', 'MISSING_ID')}'",
+            "implementation_guidance": "Replace ALL NULL duckdb_sql values with actual executable SQL queries. Use table names and column names from the schema. Use the specific product_id from shared context.",
+            "can_display": False
+        }
+    
     # Execute DS actions to get actual results for judge review
     actual_results = {}
     sql_queries = []
@@ -1343,6 +1527,8 @@ def judge_review(user_question: str, am_response: dict, ds_response: dict, table
         "am_response": am_response,
         "ds_response": ds_response,
         "executed_results": actual_results,
+        "revision_history": st.session_state.revision_history,
+        "current_revision_number": current_revision,
         "available_tables": tables_schema,
     }
     
@@ -1700,6 +1886,64 @@ def render_final_for_action(ds_step: dict):
         add_msg("ds", "Provided interpretation without re-running any steps.", artifacts={"explain_used": True})
         return
 
+    # ---- KEYWORD EXTRACTION ----
+    if action == "keyword_extraction":
+        # Check if there's review data available (from previous SQL step or cache)
+        review_data = None
+        sql = _sql_first(ds_step.get("duckdb_sql"))
+        
+        if sql:
+            # Execute SQL to get review data
+            try:
+                review_data = run_duckdb_sql(sql)
+            except Exception as e:
+                st.error(f"Failed to execute SQL for keyword extraction: {e}")
+                add_msg("ds", f"Keyword extraction failed: {e}")
+                return
+        else:
+            # Try to get review data from cached results
+            cached_sql = get_last_approved_result("sql")
+            if cached_sql and isinstance(cached_sql, pd.DataFrame):
+                review_data = cached_sql
+        
+        if review_data is None or review_data.empty:
+            st.error("No review data available for keyword extraction")
+            add_msg("ds", "No review data found for keyword extraction.")
+            return
+        
+        # Perform keyword extraction
+        st.markdown("### 🔍 Keyword Extraction from Reviews")
+        keywords_result = extract_keywords_from_reviews(review_data, top_n=10)
+        
+        if keywords_result.get("error"):
+            st.error(f"Keyword extraction error: {keywords_result['error']}")
+            add_msg("ds", f"Keyword extraction failed: {keywords_result['error']}")
+            return
+        
+        # Display results
+        st.markdown(f"**Total reviews analyzed:** {keywords_result.get('total_reviews', 0)}")
+        st.markdown(f"**Total words processed:** {keywords_result.get('total_words_analyzed', 0)}")
+        
+        if keywords_result.get("keywords"):
+            st.markdown("**Top 10 Keywords:**")
+            keywords_df = pd.DataFrame(keywords_result["keywords"])
+            st.dataframe(keywords_df, width="stretch")
+            
+            # Create a simple bar chart
+            st.markdown("**Keyword Frequency Chart:**")
+            chart_data = keywords_df.set_index("keyword")
+            st.bar_chart(chart_data)
+            
+            add_msg("ds", f"Extracted {len(keywords_result['keywords'])} keywords from {keywords_result.get('total_reviews', 0)} reviews.", 
+                   artifacts={"keywords": keywords_result["keywords"], "total_reviews": keywords_result.get('total_reviews', 0)})
+        else:
+            st.warning("No keywords found in the review data")
+            add_msg("ds", "No keywords could be extracted from the review data.")
+        
+        # Cache the results
+        st.session_state.last_results["keyword_extraction"] = keywords_result
+        return
+
     add_msg("ds", f"Action '{action}' not recognized.", artifacts=ds_step)
 
 
@@ -1928,13 +2172,26 @@ def run_turn_ceo(new_text: str):
 
         # Otherwise revise if requested by AM or Judge
         if review.get("must_revise") or judge_needs_revision:
+            # Track revision history
+            revision_entry = {
+                "user_question": effective_q,
+                "revision_number": len([r for r in st.session_state.revision_history if r.get("user_question") == effective_q]) + 1,
+                "ds_response": ds_json.copy(),
+                "judge_feedback": judge_result,
+                "am_feedback": review,
+                "timestamp": pd.Timestamp.now().isoformat()
+            }
+            st.session_state.revision_history.append(revision_entry)
+            
             # Include judge feedback in revision
             enhanced_review = dict(review)
             if judge_needs_revision:
                 enhanced_review["judge_feedback"] = {
                     "quality_issues": judge_result.get("quality_issues", []),
                     "revision_notes": judge_result.get("revision_notes", ""),
-                    "user_question_analysis": judge_result.get("user_question_analysis", "")
+                    "implementation_guidance": judge_result.get("implementation_guidance", ""),
+                    "user_question_analysis": judge_result.get("user_question_analysis", ""),
+                    "revision_analysis": judge_result.get("revision_analysis", {})
                 }
             ds_json = revise_ds(am_json, ds_json, enhanced_review, col_hints, thread_ctx)
             if ds_json.get("action_sequence"):
