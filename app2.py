@@ -90,7 +90,19 @@ except Exception:
 # System Prompts
 # ======================
 SYSTEM_AM = """
-You are the Analytics Manager (AM). Plan how to answer the CEO’s business question using the available data.
+You are the Analytics Manager (AM). Plan how to answer the CEO's business question using available data and shared context.
+
+**Inputs you receive:**
+- CEO's current question and conversation history
+- `shared_context`: Contains cached results, recent SQL queries, key findings, and extracted entities
+- `column_hints`: Business term to column mappings
+- Available table schemas
+
+**Context awareness:**
+- FIRST check `shared_context.key_findings` for relevant entities (top_selling_product_id, etc.)
+- Review `shared_context.recent_sql_results` to understand what data was already queried
+- For follow-up questions about "this product" or "this customer", use specific IDs from key findings
+- Avoid re-querying data that's already in cached results unless additional detail is needed
 
 **Action classification:** Decide the **granularity** first:
 - task_mode: "single" or "multi".
@@ -98,13 +110,10 @@ You are the Analytics Manager (AM). Plan how to answer the CEO’s business ques
   `overview`, `sql`, `eda`, `calc`, `feature_engineering`, `modeling`, `explain`.
 - If task_mode="multi" → propose a short `action_sequence` (2–5 steps) using ONLY those allowed actions.
 
-**Special rule — Data Inventory:** If the CEO asks variations of “what data do we have,” set next_action_type="overview" only and instruct DS to output **first 5 rows for each table**. No EDA/FE/modeling.
-
-**Follow-up rule:** If the CEO’s message is a follow-up asking to *explain/interpret/what features/what changed*, choose **`explain`** and DO NOT rerun modeling/EDA/SQL. Use cached results; treat the central question as context only.
-
-Use provided `column_hints` to resolve business terms strictly to existing columns.
-
-You can see the CEO's **current question**, the **central question of the active thread**, and **all prior questions**.
+**Special rules:**
+- **Data Inventory:** If CEO asks "what data do we have," set next_action_type="overview"
+- **Follow-up rule:** For explain/interpret questions, choose **`explain`** and reference cached results
+- **Entity continuity:** When CEO refers to "this product/customer", use specific IDs from shared_context.key_findings
 
 Output JSON fields:
 - am_brief
@@ -117,40 +126,60 @@ Output JSON fields:
 - notes_to_ceo
 - need_more_info
 - clarifying_questions
+- uses_shared_context: true/false
+- referenced_entities: {product_id: "...", customer_id: "..."}
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
 SYSTEM_DS = """
-You are the Data Scientist (DS). Execute the AM plan using only available columns.
-You can see:
-- `am_next_action_type` OR `am_action_sequence`
-- `current_question`, `central_question`, and `prior_questions`
-Use history to understand whether the user is giving feedback/follow-up, and keep your work anchored to the **central question**. If the current message is feedback, explain how you will revise to address it.
+You are the Data Scientist (DS). Execute the AM plan using shared context and available data.
+
+**Inputs you receive:**
+- AM plan with `am_next_action_type` OR `am_action_sequence`
+- `shared_context`: Comprehensive context with cached results, recent SQL queries, key findings, and extracted entities
+- Available table schemas
+
+**CRITICAL Context Usage:**
+- ALWAYS check `shared_context.key_findings` for relevant entities (top_selling_product_id, etc.)
+- Review `shared_context.recent_sql_results` to avoid duplicate queries
+- For follow-up questions, use specific IDs from key findings (e.g., "this product" = shared_context.key_findings.top_selling_product_id)
+- Reference cached data when available instead of re-querying
+
+**CRITICAL: Always provide actual SQL queries, never NULL or empty strings.**
+
+**Smart Query Generation:**
+- For follow-ups about "this product/customer", use the specific ID from shared_context.key_findings
+- Build on previous results - if top product is already known, query product details directly
+- Example follow-up SQL: "SELECT * FROM products WHERE product_id = '[specific_id_from_context]'"
+- Only run new aggregation queries if the specific data isn't already cached
 
 **Execution modes:**
-- If AM provided `am_action_sequence`, you may return a matching `action_sequence` (2–5 steps). Otherwise, return a single `action` that MUST match `am_next_action_type`.
-- Allowed actions: overview, sql, eda, calc, feature_engineering, modeling, explain.
-- If a different approach is objectively better, explain briefly in ds_summary, but still conform to the AM’s action(s).
+- If AM provided `am_action_sequence`, return matching `action_sequence`. Otherwise, return single `action`
+- Allowed actions: overview, sql, eda, calc, feature_engineering, modeling, explain
 
-**Special rule — Data Inventory:** If AM indicates overview OR the CEO asked “what data do we have,” your action MUST be "overview" and output previews of the **first 5 rows for each table**.
+**SQL Requirements:**
+- ALWAYS provide complete, executable SQL queries in duckdb_sql field
+- Use proper table/column names from schema
+- For entity-specific queries, use exact IDs from shared_context.key_findings
+- Example: "SELECT * FROM products WHERE product_id = 'B003AI2VGA'" (using actual ID from context)
 
-**Explain rule:** If `action=explain`, DO NOT recompute. Read cached results (prefer clustering > supervised modeling > eda > feature_engineering > sql) and interpret.
-
-**General safety for any theme:**
-- Before modeling/clustering, browse available data (schema) and propose features with reasons.
-- Dynamically exclude identifier-like, geo/postal-like, datetime, and near-constant features (names + quick stats).
-- Run a preflight check; if it fails (e.g., <2 features for clustering), ask a clarifying question rather than running.
+**Special rules:**
+- Data Inventory: Overview with first 5 rows for each table
+- Explain: Read cached results and interpret without recomputing
+- Entity continuity: "this product" MUST use product_id from shared_context.key_findings
 
 Return JSON fields:
 - ds_summary
 - need_more_info
-- clarifying_questions
+- clarifying_questions  
 - action OR action_sequence
-- duckdb_sql
+- duckdb_sql (NEVER null - always provide actual SQL)
 - charts
 - model_plan: {task, target, features, model_family, n_clusters}
 - calc_description
 - assumptions
+- uses_cached_result: true/false
+- referenced_entities: {product_id: "...", customer_id: "..."}
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
@@ -175,8 +204,27 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 """
 
 SYSTEM_AM_REVIEW = """
-You are the AM Reviewer. Given CEO question(s), AM plan, DS action(s), and lightweight result meta (shapes/samples/metrics),
-write a short plain-language summary for the CEO and critique suitability. Be mindful of the central question and whether the latest response was a follow-up.
+You are the AM Reviewer. Given CEO question(s), AM plan, DS action(s), and result meta using shared context,
+write a short plain-language summary for the CEO and critique suitability.
+
+**Inputs:**
+- CEO question and conversation history
+- `shared_context`: Complete context with cached results, key findings, and extracted entities
+- AM plan with context awareness
+- DS actions and executed results
+- Result metadata (shapes/samples/metrics)
+
+**Context-aware review:**
+- Acknowledge when shared context was properly utilized
+- Verify entity continuity (e.g., "this product" correctly resolved to specific product_id)
+- Check if cached results were leveraged appropriately
+- Assess if the response builds logically on previous findings
+
+**CEO Communication:**
+- Write summaries that reference specific entities from context (e.g., "Product B003AI2VGA, your top seller...")
+- Connect current results to previous findings when relevant
+- Be mindful if this is a follow-up to previous analysis
+
 Return JSON fields:
 - summary_for_ceo
 - appropriateness_check
@@ -188,6 +236,8 @@ Return JSON fields:
 - clarification_needed
 - clarifying_questions
 - revision_notes
+- context_utilization: "excellent/good/poor/none"
+- entity_continuity_maintained: true/false
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
@@ -212,17 +262,45 @@ Return ONLY a single JSON object like {"intent": "...", "related_to_central": tr
 """
 
 SYSTEM_JUDGE = """
-You are the **Judge Agent** - the quality assurance specialist reviewing AM and DS work.
+You are the **Judge Agent** - the quality assurance specialist reviewing AM and DS work AFTER execution using shared context.
 
 Your focused responsibilities:
-1. Review AM plans and DS execution to ensure they address the user's actual question
-2. Validate that DS selects correct tables and columns from the available schema
+1. Review EXECUTED results from DS actions to ensure they address the user's actual question
+2. Validate SQL queries and results are correct and meaningful using shared context
+3. Verify proper utilization of shared context and cached results
+4. Check entity continuity - ensure "this product/customer" references use correct IDs from shared context
+5. Approve results for display only if they meet quality standards
+
+Input includes:
+- User's question and conversation history
+- `shared_context`: Complete context with cached results, key findings, and extracted entities
+- AM plan with context awareness
+- DS response with actual SQL and executed results
+- Available table schemas
+
+**Context Validation:**
+- Verify DS used correct entity IDs from shared_context.key_findings
+- Check if cached results were properly leveraged to avoid redundant queries
+- Validate entity continuity (e.g., "this product" should use specific product_id from context)
+- Ensure new queries build logically on previous results
 
 Return ONLY valid JSON:
 {
   "judgment": "approved/needs_revision/rejected",
   "addresses_user_question": true/false,
   "user_question_analysis": "what the user actually asked vs what was delivered",
+  "context_validation": {
+    "shared_context_used": true/false,
+    "entity_continuity_correct": true/false,
+    "cached_results_leveraged": true/false,
+    "redundant_queries_avoided": true/false
+  },
+  "result_validation": {
+    "sql_correct": true/false,
+    "results_meaningful": true/false,
+    "data_sufficient": true/false,
+    "entity_ids_correct": true/false
+  },
   "table_validation": {
     "ds_table_selection_correct": true/false,
     "missing_relevant_tables": ["table_name1", "table_name2"],
@@ -231,7 +309,8 @@ Return ONLY valid JSON:
     "suggested_columns": ["recommended_col1", "recommended_col2"]
   },
   "quality_issues": ["issue1", "issue2"],
-  "revision_notes": "specific actionable feedback for AM and DS to better address the user's question"
+  "revision_notes": "specific actionable feedback for AM and DS to better address the user's question",
+  "can_display": true/false
 }
 Return only one JSON object (json).
 """
@@ -562,7 +641,7 @@ if "current_question" not in st.session_state: st.session_state.current_question
 if "threads" not in st.session_state: st.session_state.threads = []  # [{central, followups: []}]
 if "central_question" not in st.session_state: st.session_state.central_question = ""
 if "prior_questions" not in st.session_state: st.session_state.prior_questions = []
-# Caches for latest results across actions (for explain)
+# Enhanced caching system for DS results and judge approvals
 if "last_results" not in st.session_state:
     st.session_state.last_results = {
         "sql": None,
@@ -571,6 +650,14 @@ if "last_results" not in st.session_state:
         "modeling": None,      # supervised summary
         "clustering": None,    # clustering report
     }
+
+# Cache for executed results with judge approval status
+if "executed_results" not in st.session_state:
+    st.session_state.executed_results = {}  # {action_id: {result: data, approved: bool, timestamp: str}}
+
+# Cache for SQL query results to avoid re-execution
+if "sql_results_cache" not in st.session_state:
+    st.session_state.sql_results_cache = {}  # {sql_hash: dataframe}
 
 # Lightweight business term synonyms
 TERM_SYNONYMS: Dict[str, List[str]] = {
@@ -663,11 +750,107 @@ def get_all_tables() -> Dict[str, pd.DataFrame]:
     return out
 
 
-def run_duckdb_sql(sql: str) -> pd.DataFrame:
+def run_duckdb_sql(sql: str, use_cache: bool = True) -> pd.DataFrame:
+    """Execute SQL with optional caching to avoid re-running identical queries."""
+    if use_cache:
+        sql_hash = hashlib.md5(sql.encode()).hexdigest()
+        if sql_hash in st.session_state.sql_results_cache:
+            return st.session_state.sql_results_cache[sql_hash].copy()
+    
     con = duckdb.connect(database=":memory:")
     for name, df in get_all_tables().items():
         con.register(name, df)
-    return con.execute(sql).df()
+    result = con.execute(sql).df()
+    
+    if use_cache:
+        st.session_state.sql_results_cache[sql_hash] = result.copy()
+    
+    return result
+
+
+def cache_result_with_approval(action_id: str, result_data: Any, approved: bool = False) -> None:
+    """Cache result data with judge approval status."""
+    import datetime
+    st.session_state.executed_results[action_id] = {
+        "result": result_data,
+        "approved": approved,
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+
+
+def get_cached_result(action_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve cached result if it exists and is approved."""
+    cached = st.session_state.executed_results.get(action_id)
+    if cached and cached.get("approved", False):
+        return cached
+    return None
+
+
+def get_last_approved_result(action_type: str) -> Optional[Any]:
+    """Get the most recent approved result for a specific action type."""
+    for action_id, cached in st.session_state.executed_results.items():
+        if cached.get("approved", False) and action_id.startswith(action_type):
+            return cached.get("result")
+    return None
+
+
+def build_shared_context() -> Dict[str, Any]:
+    """Build comprehensive shared context for all agents."""
+    # Get cached approved results
+    cached_results = {}
+    for result_type in ["sql", "eda", "modeling", "clustering", "feature_engineering"]:
+        cached = get_last_approved_result(result_type)
+        if cached:
+            cached_results[result_type] = cached
+    
+    # Get recent SQL results with data samples
+    recent_sql_results = {}
+    sql_count = 0
+    for action_id, cached_data in st.session_state.executed_results.items():
+        if cached_data.get("approved", False) and action_id.startswith("sql") and sql_count < 3:
+            result_data = cached_data.get("result", {})
+            sql = result_data.get("duckdb_sql")
+            if sql:
+                try:
+                    df = run_duckdb_sql(sql)
+                    recent_sql_results[f"recent_query_{sql_count + 1}"] = {
+                        "sql": sql,
+                        "row_count": len(df),
+                        "columns": list(df.columns),
+                        "sample_data": df.head(3).to_dict(orient="records"),
+                        "timestamp": cached_data.get("timestamp")
+                    }
+                    sql_count += 1
+                except Exception:
+                    pass
+    
+    # Extract key findings and entities
+    key_findings = {}
+    if "sql" in cached_results:
+        # Try to extract top products, customers, etc. from recent SQL results
+        for query_key, query_data in recent_sql_results.items():
+            sample_data = query_data.get("sample_data", [])
+            if sample_data and isinstance(sample_data, list) and len(sample_data) > 0:
+                first_row = sample_data[0]
+                if "product_id" in first_row:
+                    key_findings["top_selling_product_id"] = first_row["product_id"]
+                if "customer_id" in first_row:
+                    key_findings["top_customer_id"] = first_row["customer_id"]
+                if any(col.endswith("_sales") or col.endswith("_revenue") for col in first_row.keys()):
+                    key_findings["sales_metrics_available"] = True
+    
+    return {
+        "cached_results": cached_results,
+        "recent_sql_results": recent_sql_results,
+        "key_findings": key_findings,
+        "conversation_context": {
+            "central_question": st.session_state.central_question,
+            "current_question": st.session_state.current_question,
+            "prior_questions": st.session_state.prior_questions
+        },
+        "available_tables": {k: list(v.columns) for k, v in get_all_tables().items()},
+        "context_timestamp": pd.Timestamp.now().isoformat()
+    }
 
 
 def add_msg(role, content, artifacts=None):
@@ -1020,9 +1203,10 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
 # AM/DS/Review pipeline
 # ======================
 def run_am_plan(prompt: str, column_hints: dict, context: dict) -> dict:
+    shared_context = build_shared_context()
     payload = {
         "ceo_question": prompt,
-        "tables": {k: list(v.columns) for k, v in (get_all_tables() or {}).items()},
+        "shared_context": shared_context,
         "column_hints": column_hints,
         "context": context,
     }
@@ -1073,15 +1257,14 @@ def _normalize_sequence(seq, fallback_action) -> List[dict]:
 
 
 def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
+    shared_context = build_shared_context()
+    
     ds_payload = {
         "am_plan": am_json.get("plan_for_ds", ""),
         "am_next_action_type": am_json.get("next_action_type", "eda"),
         "am_action_sequence": am_json.get("action_sequence", []),
-        "tables": {k: list(v.columns) for k, v in (get_all_tables() or {}).items()},
+        "shared_context": shared_context,
         "column_hints": column_hints,
-        "current_question": thread_ctx.get("current_question"),
-        "central_question": thread_ctx.get("central_question"),
-        "prior_questions": thread_ctx.get("prior_questions", []),
     }
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
     st.session_state.last_ds_json = ds_json
@@ -1107,31 +1290,81 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     return ds_json
 
 
-def judge_review(user_question: str, am_response: dict, ds_response: dict, tables_schema: dict) -> dict:
-    """Judge agent reviews AM and DS work for quality and correctness."""
+def judge_review(user_question: str, am_response: dict, ds_response: dict, tables_schema: dict, executed_results: dict = None) -> dict:
+    """Judge agent reviews AM and DS work AFTER execution for quality and correctness."""
+    
+    # Execute DS actions to get actual results for judge review
+    actual_results = {}
+    sql_queries = []
+    
+    if ds_response.get("action_sequence"):
+        # Handle multi-step actions
+        for step in ds_response.get("action_sequence", []):
+            sql = _sql_first(step.get("duckdb_sql"))
+            if sql:
+                sql_queries.append(sql)
+                try:
+                    result = run_duckdb_sql(sql)
+                    actual_results[f"step_{len(sql_queries)}"] = {
+                        "sql": sql,
+                        "row_count": len(result),
+                        "columns": list(result.columns),
+                        "sample_data": result.head(5).to_dict(orient="records")
+                    }
+                except Exception as e:
+                    actual_results[f"step_{len(sql_queries)}"] = {
+                        "sql": sql,
+                        "error": str(e)
+                    }
+    else:
+        # Handle single action
+        sql = _sql_first(ds_response.get("duckdb_sql"))
+        if sql:
+            sql_queries.append(sql)
+            try:
+                result = run_duckdb_sql(sql)
+                actual_results["single_action"] = {
+                    "sql": sql,
+                    "row_count": len(result),
+                    "columns": list(result.columns),
+                    "sample_data": result.head(5).to_dict(orient="records")
+                }
+            except Exception as e:
+                actual_results["single_action"] = {
+                    "sql": sql,
+                    "error": str(e)
+                }
+    
+    shared_context = build_shared_context()
+    
     judge_payload = {
         "user_question": user_question,
+        "shared_context": shared_context,
         "am_response": am_response,
         "ds_response": ds_response,
+        "executed_results": actual_results,
         "available_tables": tables_schema,
-        "central_question": st.session_state.central_question,
-        "prior_questions": st.session_state.prior_questions
     }
+    
     return llm_json(SYSTEM_JUDGE, json.dumps(judge_payload))
 
 def am_review(ceo_prompt: str, ds_json: dict, meta: dict) -> dict:
-    bundle = {"ceo_question": ceo_prompt,
-              "am_plan": st.session_state.last_am_json,
-              "ds_json": ds_json,
-              "meta": meta,
-              "central_question": st.session_state.central_question,
-              "prior_questions": st.session_state.prior_questions}
+    shared_context = build_shared_context()
+    bundle = {
+        "ceo_question": ceo_prompt,
+        "shared_context": shared_context,
+        "am_plan": st.session_state.last_am_json,
+        "ds_json": ds_json,
+        "meta": meta,
+    }
     return llm_json(SYSTEM_AM_REVIEW, json.dumps(bundle))
 
 
 def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
+    shared_context = build_shared_context()
     payload = {
         "am_plan": am_json.get("plan_for_ds", ""),
+        "shared_context": shared_context,
         "previous_ds_json": prev_ds_json,
         "am_critique": {
             "appropriateness_check": review_json.get("appropriateness_check"),
@@ -1140,8 +1373,6 @@ def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict, column_hints
             "improvements": review_json.get("improvements"),
         },
         "column_hints": column_hints,
-        "central_question": thread_ctx.get("central_question"),
-        "prior_questions": thread_ctx.get("prior_questions", []),
     }
     return llm_json(SYSTEM_DS_REVISE, json.dumps(payload))
 
@@ -1599,23 +1830,38 @@ def run_turn_ceo(new_text: str):
                 "calc_description": ds_json_local.get("calc_description"),
             })
 
-    # Render (sequence-aware)
-    def _render(ds_json_local: dict):
+    # Render only if judge-approved (sequence-aware)
+    def _render(ds_json_local: dict, judge_approved: bool = False):
+        if not judge_approved:
+            add_msg("system", "Results pending judge approval...")
+            render_chat()
+            return
+            
         if ds_json_local.get("action_sequence"):
             for step in ds_json_local.get("action_sequence")[:5]:
+                # Cache each step result with approval
+                action_id = f"{step.get('action', 'unknown')}_{len(st.session_state.executed_results)}"
+                cache_result_with_approval(action_id, step, approved=True)
                 render_final_for_action(step)
-            add_msg("system", "Multi-step run rendered.")
+            add_msg("system", "✅ Judge-approved multi-step results rendered.")
             render_chat()
         else:
             if not ds_json_local.get("action"):
                 ds_json_local["action"] = am_json.get("next_action_type") or "eda"
-            render_final_for_action({
+            
+            step_data = {
                 "action": ds_json_local.get("action"),
                 "duckdb_sql": ds_json_local.get("duckdb_sql"),
                 "charts": ds_json_local.get("charts"),
                 "model_plan": ds_json_local.get("model_plan"),
                 "calc_description": ds_json_local.get("calc_description"),
-            })
+            }
+            
+            # Cache result with approval
+            action_id = f"{step_data.get('action', 'unknown')}_{len(st.session_state.executed_results)}"
+            cache_result_with_approval(action_id, step_data, approved=True)
+            render_final_for_action(step_data)
+            add_msg("system", "✅ Judge-approved results rendered.")
             render_chat()
 
     while loop_count < max_loops:
@@ -1669,9 +1915,15 @@ def run_turn_ceo(new_text: str):
             render_chat(); return
 
         # If sufficient and no revision required AND judge approves → render final and exit
+        judge_approved = judge_result.get("judgment") == "approved" and judge_result.get("can_display", False)
         judge_needs_revision = judge_result.get("judgment") in ["needs_revision", "rejected"]
-        if review.get("sufficient_to_answer") and not review.get("must_revise") and not judge_needs_revision:
-            _render(ds_json)
+        
+        if review.get("sufficient_to_answer") and not review.get("must_revise") and judge_approved:
+            # Hide judge feedback if approved to keep conversation clean
+            if judge_approved:
+                # Remove or minimize judge message display
+                st.session_state.chat = [msg for msg in st.session_state.chat if msg.get("role") != "judge" or msg.get("content") != f"Quality Assessment: {judge_result.get('judgment', 'Unknown')}"]
+            _render(ds_json, judge_approved=True)
             return
 
         # Otherwise revise if requested by AM or Judge
@@ -1695,8 +1947,9 @@ def run_turn_ceo(new_text: str):
             render_chat()
             continue  # loop for another review
 
-        # No revision required → render current best and exit
-        _render(ds_json)
+        # No revision required but check judge approval → render current best and exit
+        final_judge_approved = judge_result.get("judgment") == "approved" and judge_result.get("can_display", False)
+        _render(ds_json, judge_approved=final_judge_approved)
         return
 
     add_msg("system", "Reached review limit; presenting current best effort with noted caveats.")
