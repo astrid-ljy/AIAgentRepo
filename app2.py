@@ -345,9 +345,23 @@ Input includes:
 - Validate that text processing actually occurred, not just data retrieval
 - Check if results include actual keywords with frequencies
 
+**SYSTEMATIC AGENT EVALUATION:**
+For each DS response, evaluate in this order:
+
+1. **Technical Correctness**: Is the SQL valid and executing successfully?
+2. **Interpretation Reasonableness**: Is the agent's approach a reasonable interpretation of the user's question?
+3. **Ambiguity Assessment**: Are there multiple valid interpretations of the user's question?
+4. **Result Quality**: Do the results meaningfully address what the user asked?
+
+**Decision Logic:**
+- If technically correct + reasonable interpretation → `approved` 
+- If technically wrong + clear user intent → `needs_revision` with specific fixes
+- If technically correct + reasonable BUT alternative interpretations exist → `needs_clarification`
+- If technically correct + unreasonable interpretation → `needs_revision` with better approach
+
 **AMBIGUOUS TERMS DETECTION:**
-When agents have different interpretations of terms like "top selling" (revenue vs quantity), "best" (various metrics), "most popular" (sales vs reviews):
-- **DO NOT force one interpretation over another**
+When agents have different valid interpretations of terms like "top selling" (revenue vs quantity), "best" (various metrics), "most popular" (sales vs reviews):
+- **DO NOT force one interpretation over another**  
 - **Detect the ambiguity** and recommend asking user for clarification
 - Set `judgment: "needs_clarification"` instead of `needs_revision`
 - Include clarification questions in response
