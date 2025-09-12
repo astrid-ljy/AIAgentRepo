@@ -1164,13 +1164,63 @@ def fix_ds_response_with_fallback(ds_response: dict, user_question: str, shared_
             if step.get("action") == "sql":
                 sql = step.get("duckdb_sql")
                 if sql is None or sql == "NULL" or (isinstance(sql, str) and sql.strip() == ""):
-                    fallback_sql = generate_fallback_sql(user_question, shared_context)
+                    # Generate context-aware fallback SQL based on step description
+                    step_description = step.get("description", "").lower()
+                    fallback_sql = generate_contextual_fallback_sql(user_question, shared_context, step_description, i)
                     fixed_step["duckdb_sql"] = fallback_sql
             fixed_sequence.append(fixed_step)
         fixed_response["action_sequence"] = fixed_sequence
         fixed_response["ds_summary"] = fixed_response.get("ds_summary", "") + " [FALLBACK SQL GENERATED]"
     
     return fixed_response
+
+
+def generate_contextual_fallback_sql(user_question: str, shared_context: dict, step_description: str, step_index: int) -> str:
+    """Generate context-aware fallback SQL for specific action sequence steps."""
+    question_lower = user_question.lower()
+    step_desc_lower = step_description.lower()
+    
+    # Get entity resolution data
+    conversation_entities = shared_context.get("conversation_entities", {})
+    detected_entities = conversation_entities.get("detected_entities", {})
+    resolved_ids = conversation_entities.get("resolved_entity_ids", {})
+    key_findings = shared_context.get("key_findings", {})
+    
+    # Try to get product_id from context (multiple sources)
+    product_id = (resolved_ids.get("product_id") or 
+                 key_findings.get("latest_product_id") or
+                 shared_context.get("referenced_entities", {}).get("product_id"))
+    
+    # If we have a product context, generate product-specific queries
+    if product_id:
+        # Step 1 or category-related: Product details/category
+        if step_index == 0 or "category" in step_desc_lower or "information" in step_desc_lower or "details" in step_desc_lower:
+            return f"""
+                SELECT p.product_category_name, p.product_name_lenght, p.product_description_lenght, 
+                       p.product_photos_qty, p.product_weight_g, p.product_length_cm, 
+                       p.product_height_cm, p.product_width_cm,
+                       pc.product_category_name_english
+                FROM olist_products_dataset p
+                LEFT JOIN product_category_name_translation pc ON p.product_category_name = pc.product_category_name
+                WHERE p.product_id = '{product_id}'
+            """.strip()
+        
+        # Step 2 or customer-related: Top customers for this product
+        elif step_index == 1 or "customer" in step_desc_lower or "top" in step_desc_lower or "contributor" in step_desc_lower:
+            return f"""
+                SELECT o.customer_id, SUM(oi.price) as total_spent, COUNT(*) as purchase_count,
+                       c.customer_city, c.customer_state
+                FROM olist_order_items_dataset oi 
+                JOIN olist_orders_dataset o ON oi.order_id = o.order_id 
+                JOIN olist_customers_dataset c ON o.customer_id = c.customer_id
+                WHERE oi.product_id = '{product_id}' 
+                GROUP BY o.customer_id, c.customer_city, c.customer_state
+                ORDER BY total_spent DESC 
+                LIMIT 5
+            """.strip()
+    
+    # Fallback to original method if no specific context
+    return generate_fallback_sql(user_question, shared_context)
 
 
 # Brazilian E-commerce Dataset Entity Schema
