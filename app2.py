@@ -923,6 +923,150 @@ def get_last_approved_result(action_type: str) -> Optional[Any]:
     return None
 
 
+def generate_fallback_sql(user_question: str, shared_context: dict) -> str:
+    """Generate flexible fallback SQL for any entity type when LLM fails."""
+    question_lower = user_question.lower()
+    
+    # Get entity resolution data
+    conversation_entities = shared_context.get("conversation_entities", {})
+    detected_entities = conversation_entities.get("detected_entities", {})
+    resolved_ids = conversation_entities.get("resolved_entity_ids", {})
+    key_findings = shared_context.get("key_findings", {})
+    
+    # SQL Templates for different entity types and query patterns
+    sql_templates = {
+        # CUSTOMER queries
+        "customer_top_products_frequency": """
+            SELECT oi.product_id, COUNT(*) as purchase_frequency 
+            FROM olist_order_items_dataset oi 
+            JOIN olist_orders_dataset o ON oi.order_id = o.order_id 
+            WHERE o.customer_id = '{customer_id}' 
+            GROUP BY oi.product_id 
+            ORDER BY purchase_frequency DESC 
+            LIMIT {limit}
+        """,
+        "customer_top_products_sales": """
+            SELECT oi.product_id, SUM(oi.price) as total_sales 
+            FROM olist_order_items_dataset oi 
+            JOIN olist_orders_dataset o ON oi.order_id = o.order_id 
+            WHERE o.customer_id = '{customer_id}' 
+            GROUP BY oi.product_id 
+            ORDER BY total_sales DESC 
+            LIMIT {limit}
+        """,
+        
+        # PRODUCT queries  
+        "product_details": """
+            SELECT p.*, pc.product_category_name_english
+            FROM olist_products_dataset p
+            LEFT JOIN product_category_name_translation pc ON p.product_category_name = pc.product_category_name
+            WHERE p.product_id = '{product_id}'
+        """,
+        "product_top_customers": """
+            SELECT o.customer_id, SUM(oi.price) as total_spent, COUNT(*) as purchase_count
+            FROM olist_order_items_dataset oi 
+            JOIN olist_orders_dataset o ON oi.order_id = o.order_id 
+            WHERE oi.product_id = '{product_id}' 
+            GROUP BY o.customer_id 
+            ORDER BY total_spent DESC 
+            LIMIT {limit}
+        """,
+        
+        # SELLER queries
+        "seller_performance": """
+            SELECT s.seller_id, s.seller_city, s.seller_state, 
+                   COUNT(oi.order_id) as total_orders,
+                   SUM(oi.price) as total_revenue
+            FROM olist_sellers_dataset s
+            JOIN olist_order_items_dataset oi ON s.seller_id = oi.seller_id
+            WHERE s.seller_id = '{seller_id}'
+            GROUP BY s.seller_id, s.seller_city, s.seller_state
+        """,
+        "top_sellers": """
+            SELECT oi.seller_id, SUM(oi.price) as total_revenue, COUNT(*) as total_orders
+            FROM olist_order_items_dataset oi 
+            GROUP BY oi.seller_id 
+            ORDER BY total_revenue DESC 
+            LIMIT {limit}
+        """,
+        
+        # ORDER queries
+        "order_details": """
+            SELECT o.*, oi.product_id, oi.price, oi.freight_value
+            FROM olist_orders_dataset o
+            JOIN olist_order_items_dataset oi ON o.order_id = oi.order_id
+            WHERE o.order_id = '{order_id}'
+        """,
+        
+        # REVIEW queries
+        "product_reviews": """
+            SELECT r.review_score, r.review_comment_title, r.review_comment_message
+            FROM olist_order_reviews_dataset r
+            JOIN olist_orders_dataset o ON r.order_id = o.order_id
+            JOIN olist_order_items_dataset oi ON o.order_id = oi.order_id
+            WHERE oi.product_id = '{product_id}'
+            ORDER BY r.review_creation_date DESC
+            LIMIT {limit}
+        """,
+        
+        # CATEGORY queries
+        "category_performance": """
+            SELECT p.product_category_name, 
+                   COUNT(*) as total_products,
+                   AVG(oi.price) as avg_price,
+                   SUM(oi.price) as total_sales
+            FROM olist_products_dataset p
+            JOIN olist_order_items_dataset oi ON p.product_id = oi.product_id
+            WHERE p.product_category_name = '{category}'
+            GROUP BY p.product_category_name
+        """
+    }
+    
+    # Determine query type and entity
+    limit = 3 if "three" in question_lower or "top 3" in question_lower else 5
+    
+    # Match question patterns to appropriate SQL templates
+    for entity_type, entity_data in detected_entities.items():
+        entity_id_key = f"{entity_type}_id"
+        entity_id = resolved_ids.get(entity_id_key) or key_findings.get(f"latest_{entity_type}_id")
+        
+        if not entity_id:
+            continue
+            
+        # Customer-specific queries
+        if entity_type == "customer" and entity_data.get("referenced"):
+            if "frequency" in question_lower and "product" in question_lower:
+                return sql_templates["customer_top_products_frequency"].format(customer_id=entity_id, limit=limit)
+            elif "sales" in question_lower and "product" in question_lower:
+                return sql_templates["customer_top_products_sales"].format(customer_id=entity_id, limit=limit)
+        
+        # Product-specific queries
+        elif entity_type == "product" and entity_data.get("referenced"):
+            if "category" in question_lower or "details" in question_lower or "information" in question_lower:
+                return sql_templates["product_details"].format(product_id=entity_id)
+            elif "customer" in question_lower and ("top" in question_lower or "contributor" in question_lower):
+                return sql_templates["product_top_customers"].format(product_id=entity_id, limit=limit)
+            elif "review" in question_lower:
+                return sql_templates["product_reviews"].format(product_id=entity_id, limit=limit)
+        
+        # Seller-specific queries
+        elif entity_type == "seller" and entity_data.get("referenced"):
+            return sql_templates["seller_performance"].format(seller_id=entity_id)
+        
+        # Order-specific queries  
+        elif entity_type == "order" and entity_data.get("referenced"):
+            return sql_templates["order_details"].format(order_id=entity_id)
+    
+    # Fallback to common aggregation queries
+    if "top selling product" in question_lower:
+        return sql_templates["customer_top_products_sales"].format(customer_id="ANY", limit=1).replace("WHERE o.customer_id = 'ANY'", "")
+    elif "top seller" in question_lower:
+        return sql_templates["top_sellers"].format(limit=limit)
+    
+    # Ultimate fallback
+    return "SELECT 'Unable to generate appropriate query for this request' as message"
+
+
 def validate_ds_response(ds_response: dict) -> Dict[str, Any]:
     """Validate DS response for critical errors before judge review."""
     issues = []
@@ -952,6 +1096,181 @@ def validate_ds_response(ds_response: dict) -> Dict[str, Any]:
         "valid": len(issues) == 0,
         "issues": issues,
         "has_critical_errors": any("CRITICAL:" in issue for issue in issues)
+    }
+
+
+def fix_ds_response_with_fallback(ds_response: dict, user_question: str, shared_context: dict) -> dict:
+    """Fix DS response by injecting fallback SQL when LLM fails."""
+    fixed_response = ds_response.copy()
+    
+    # Fix single SQL action
+    if ds_response.get("action") == "sql":
+        sql = ds_response.get("duckdb_sql")
+        if sql is None or sql == "NULL" or (isinstance(sql, str) and sql.strip() == ""):
+            fallback_sql = generate_fallback_sql(user_question, shared_context)
+            fixed_response["duckdb_sql"] = fallback_sql
+            fixed_response["ds_summary"] = fixed_response.get("ds_summary", "") + " [FALLBACK SQL GENERATED]"
+    
+    # Fix action sequence SQL
+    if ds_response.get("action_sequence"):
+        fixed_sequence = []
+        for i, step in enumerate(ds_response.get("action_sequence", [])):
+            fixed_step = step.copy()
+            if step.get("action") == "sql":
+                sql = step.get("duckdb_sql")
+                if sql is None or sql == "NULL" or (isinstance(sql, str) and sql.strip() == ""):
+                    fallback_sql = generate_fallback_sql(user_question, shared_context)
+                    fixed_step["duckdb_sql"] = fallback_sql
+            fixed_sequence.append(fixed_step)
+        fixed_response["action_sequence"] = fixed_sequence
+        fixed_response["ds_summary"] = fixed_response.get("ds_summary", "") + " [FALLBACK SQL GENERATED]"
+    
+    return fixed_response
+
+
+# Brazilian E-commerce Dataset Entity Schema
+ENTITY_SCHEMA = {
+    "customer": {
+        "primary_key": "customer_id",
+        "tables": ["olist_customers_dataset", "olist_orders_dataset"],
+        "reference_patterns": ["this customer", "the customer", "customer", "buyer"],
+        "typical_queries": ["top customer", "customer analysis", "customer behavior"],
+        "related_entities": ["order", "review", "geolocation"]
+    },
+    "product": {
+        "primary_key": "product_id", 
+        "tables": ["olist_products_dataset", "olist_order_items_dataset"],
+        "reference_patterns": ["this product", "the product", "product", "item"],
+        "typical_queries": ["top selling product", "product analysis", "product category"],
+        "related_entities": ["order", "seller", "review", "category"]
+    },
+    "order": {
+        "primary_key": "order_id",
+        "tables": ["olist_orders_dataset", "olist_order_items_dataset"],
+        "reference_patterns": ["this order", "the order", "order", "purchase"],
+        "typical_queries": ["order analysis", "order status", "order value"],
+        "related_entities": ["customer", "product", "seller", "payment", "review"]
+    },
+    "seller": {
+        "primary_key": "seller_id",
+        "tables": ["olist_sellers_dataset", "olist_order_items_dataset"],
+        "reference_patterns": ["this seller", "the seller", "seller", "vendor"],
+        "typical_queries": ["top seller", "seller performance", "seller analysis"],
+        "related_entities": ["product", "order", "geolocation"]
+    },
+    "payment": {
+        "primary_key": "order_id",  # payments are linked to orders
+        "tables": ["olist_order_payments_dataset"],
+        "reference_patterns": ["this payment", "the payment", "payment", "transaction"],
+        "typical_queries": ["payment method", "payment analysis", "payment value"],
+        "related_entities": ["order", "customer"]
+    },
+    "review": {
+        "primary_key": "review_id",
+        "tables": ["olist_order_reviews_dataset"],
+        "reference_patterns": ["this review", "the review", "review", "rating"],
+        "typical_queries": ["review analysis", "review sentiment", "review score"],
+        "related_entities": ["order", "customer", "product"]
+    },
+    "category": {
+        "primary_key": "product_category_name",
+        "tables": ["olist_products_dataset"],
+        "reference_patterns": ["this category", "the category", "category", "product type"],
+        "typical_queries": ["category analysis", "top category", "category performance"],
+        "related_entities": ["product"]
+    },
+    "geolocation": {
+        "primary_key": "geolocation_zip_code_prefix",
+        "tables": ["olist_geolocation_dataset", "olist_customers_dataset", "olist_sellers_dataset"],
+        "reference_patterns": ["this location", "the location", "city", "state"],
+        "typical_queries": ["location analysis", "geographic distribution", "regional sales"],
+        "related_entities": ["customer", "seller"]
+    }
+}
+
+
+def detect_entity_references(text: str) -> Dict[str, Any]:
+    """Dynamically detect entity references in user questions."""
+    text_lower = text.lower()
+    detected_entities = {}
+    
+    for entity_type, schema in ENTITY_SCHEMA.items():
+        # Check for reference patterns
+        for pattern in schema["reference_patterns"]:
+            if pattern in text_lower:
+                detected_entities[entity_type] = {
+                    "referenced": True,
+                    "pattern_matched": pattern,
+                    "primary_key": schema["primary_key"],
+                    "tables": schema["tables"]
+                }
+                break
+        
+        # Check for typical query patterns  
+        for query_pattern in schema["typical_queries"]:
+            if query_pattern in text_lower:
+                if entity_type not in detected_entities:
+                    detected_entities[entity_type] = {
+                        "referenced": False,
+                        "query_type": query_pattern,
+                        "primary_key": schema["primary_key"],
+                        "tables": schema["tables"]
+                    }
+    
+    return detected_entities
+
+
+def extract_entity_ids_from_results(query_results: dict, entity_types: List[str]) -> Dict[str, str]:
+    """Extract actual entity IDs from SQL query results."""
+    extracted_ids = {}
+    
+    for result_key, result_data in query_results.items():
+        sample_data = result_data.get("sample_data", [])
+        if sample_data and isinstance(sample_data, list) and len(sample_data) > 0:
+            first_row = sample_data[0]
+            
+            # Look for entity IDs in the result data
+            for entity_type in entity_types:
+                if entity_type in ENTITY_SCHEMA:
+                    primary_key = ENTITY_SCHEMA[entity_type]["primary_key"]
+                    if primary_key in first_row:
+                        extracted_ids[f"{entity_type}_id"] = str(first_row[primary_key])
+                        
+    return extracted_ids
+
+
+def resolve_contextual_entities(current_question: str, conversation_history: List[str], cached_results: dict) -> Dict[str, Any]:
+    """Resolve 'this X' references to actual entity IDs from conversation context."""
+    
+    # Detect what entities are being referenced in current question
+    current_entities = detect_entity_references(current_question)
+    
+    # Look for entities discussed in conversation history
+    historical_entities = {}
+    for past_question in conversation_history[-5:]:  # Last 5 questions
+        hist_entities = detect_entity_references(past_question)
+        historical_entities.update(hist_entities)
+    
+    # Extract actual entity IDs from cached results
+    entity_types_to_find = []
+    for entity_type, data in current_entities.items():
+        if data.get("referenced"):  # If using "this X" pattern
+            entity_types_to_find.append(entity_type)
+    
+    # Get all recent SQL results to extract IDs
+    all_sql_results = {}
+    if "sql" in cached_results:
+        # Add current cached SQL results
+        all_sql_results.update(cached_results.get("sql", {}))
+    
+    # Extract IDs from results
+    resolved_ids = extract_entity_ids_from_results(all_sql_results, entity_types_to_find)
+    
+    return {
+        "current_entities": current_entities,
+        "historical_entities": historical_entities, 
+        "resolved_ids": resolved_ids,
+        "entity_schema": {etype: ENTITY_SCHEMA[etype] for etype in set(list(current_entities.keys()) + list(historical_entities.keys()))}
     }
 
 
@@ -985,29 +1304,62 @@ def build_shared_context() -> Dict[str, Any]:
                 except Exception:
                     pass
     
-    # Extract key findings and entities
+    # NEW: Flexible entity resolution system
+    recent_questions = st.session_state.prior_questions[-5:] if st.session_state.prior_questions else []
+    current_q = st.session_state.current_question or ""
+    
+    # Resolve all contextual entities dynamically
+    entity_resolution = resolve_contextual_entities(current_q, recent_questions, cached_results)
+    
+    # Extract key findings using flexible system
     key_findings = {}
-    if "sql" in cached_results:
-        # Try to extract top products, customers, etc. from recent SQL results
+    for entity_type, schema in ENTITY_SCHEMA.items():
+        primary_key = schema["primary_key"]
+        
+        # Look for this entity type in recent SQL results
         for query_key, query_data in recent_sql_results.items():
             sample_data = query_data.get("sample_data", [])
             if sample_data and isinstance(sample_data, list) and len(sample_data) > 0:
                 first_row = sample_data[0]
-                if "product_id" in first_row:
-                    key_findings["top_selling_product_id"] = first_row["product_id"]
-                if "customer_id" in first_row:
-                    key_findings["top_customer_id"] = first_row["customer_id"]
-                if any(col.endswith("_sales") or col.endswith("_revenue") for col in first_row.keys()):
-                    key_findings["sales_metrics_available"] = True
+                if primary_key in first_row:
+                    key_findings[f"latest_{entity_type}_id"] = str(first_row[primary_key])
+                    
+                    # Special handling for sales metrics
+                    if any(col.endswith("_sales") or col.endswith("_revenue") or "total" in col.lower() for col in first_row.keys()):
+                        key_findings[f"{entity_type}_has_sales_data"] = True
+    
+    # Build conversation entities with flexible detection
+    conversation_entities = {
+        "question_sequence": recent_questions + ([current_q] if current_q else []),
+        "detected_entities": entity_resolution["current_entities"],
+        "historical_entities": entity_resolution["historical_entities"],
+        "resolved_entity_ids": entity_resolution["resolved_ids"],
+        "entity_continuity": {}
+    }
+    
+    # Track which entities have continuity across questions
+    for entity_type in ENTITY_SCHEMA.keys():
+        has_reference = entity_type in entity_resolution["current_entities"] and entity_resolution["current_entities"][entity_type].get("referenced")
+        has_historical = entity_type in entity_resolution["historical_entities"] 
+        has_resolved_id = f"{entity_type}_id" in entity_resolution["resolved_ids"]
+        
+        conversation_entities["entity_continuity"][entity_type] = {
+            "currently_referenced": has_reference,
+            "discussed_historically": has_historical,
+            "id_available": has_resolved_id,
+            "context_complete": has_reference and has_resolved_id
+        }
     
     return {
         "cached_results": cached_results,
         "recent_sql_results": recent_sql_results,
         "key_findings": key_findings,
+        "conversation_entities": conversation_entities,
         "conversation_context": {
             "central_question": st.session_state.central_question,
             "current_question": st.session_state.current_question,
-            "prior_questions": st.session_state.prior_questions
+            "prior_questions": st.session_state.prior_questions,
+            "question_flow_summary": f"Previous: {' -> '.join(recent_questions[-2:])}, Current: {current_q}" if recent_questions else f"Current: {current_q}"
         },
         "available_tables": {k: list(v.columns) for k, v in get_all_tables().items()},
         "context_timestamp": pd.Timestamp.now().isoformat()
@@ -1460,22 +1812,45 @@ def judge_review(user_question: str, am_response: dict, ds_response: dict, table
     # Pre-validate DS response for critical errors
     validation = validate_ds_response(ds_response)
     if validation["has_critical_errors"]:
-        return {
-            "judgment": "needs_revision",
-            "addresses_user_question": False,
-            "user_question_analysis": "DS response has critical errors that prevent execution",
-            "revision_analysis": {
-                "revision_number": current_revision,
-                "progress_made": False,
-                "same_issues_repeated": True,
-                "escalation_needed": True
-            },
-            "quality_issues": validation["issues"],
-            "revision_notes": f"CRITICAL VALIDATION ERRORS (Revision {current_revision}): " + "; ".join(validation["issues"]) + 
-                            f"\n\nYou MUST provide actual SQL queries, not NULL values. Example for product info: SELECT p.product_category_name FROM products p WHERE p.product_id = '{am_response.get('referenced_entities', {}).get('product_id', 'MISSING_ID')}'",
-            "implementation_guidance": "Replace ALL NULL duckdb_sql values with actual executable SQL queries. Use table names and column names from the schema. Use the specific product_id from shared context.",
-            "can_display": False
-        }
+        # Try fallback mechanism after revision 2
+        if current_revision >= 2:
+            st.warning(f"🔧 LLM failed to generate SQL after {current_revision} attempts. Using fallback mechanism...")
+            shared_context = build_shared_context()
+            fixed_ds_response = fix_ds_response_with_fallback(ds_response, user_question, shared_context)
+            
+            # Re-validate after fallback
+            fixed_validation = validate_ds_response(fixed_ds_response) 
+            if not fixed_validation["has_critical_errors"]:
+                st.success("✅ Fallback SQL generated successfully")
+                # Update the ds_response for continued processing
+                ds_response.update(fixed_ds_response)
+            else:
+                st.error("❌ Fallback mechanism also failed")
+                return {
+                    "judgment": "rejected",
+                    "addresses_user_question": False,
+                    "user_question_analysis": "Both LLM and fallback mechanism failed to generate valid SQL",
+                    "quality_issues": ["LLM completely failed to generate SQL", "Fallback mechanism insufficient"],
+                    "revision_notes": "SYSTEM FAILURE: Unable to generate SQL queries after multiple attempts and fallback",
+                    "can_display": False
+                }
+        else:
+            return {
+                "judgment": "needs_revision",
+                "addresses_user_question": False,
+                "user_question_analysis": "DS response has critical errors that prevent execution",
+                "revision_analysis": {
+                    "revision_number": current_revision,
+                    "progress_made": False,
+                    "same_issues_repeated": True,
+                    "escalation_needed": True
+                },
+                "quality_issues": validation["issues"],
+                "revision_notes": f"CRITICAL VALIDATION ERRORS (Revision {current_revision}): " + "; ".join(validation["issues"]) + 
+                                f"\n\nYou MUST provide actual SQL queries, not NULL values. Example for product info: SELECT p.product_category_name FROM products p WHERE p.product_id = '{am_response.get('referenced_entities', {}).get('product_id', 'MISSING_ID')}'",
+                "implementation_guidance": "Replace ALL NULL duckdb_sql values with actual executable SQL queries. Use table names and column names from the schema. Use the specific product_id from shared context.",
+                "can_display": False
+            }
     
     # Execute DS actions to get actual results for judge review
     actual_results = {}
@@ -2199,8 +2574,15 @@ def run_turn_ceo(new_text: str):
                     ds_json.get("action_sequence"),
                     (am_json.get("next_action_type") or "eda").lower()
                 )
-            add_msg("ds", ds_json.get("ds_summary","(revised)"),
-                    artifacts={"mode": "multi" if ds_json.get("action_sequence") else "single"})
+            add_msg("ds", ds_json.get("ds_summary","(revised)"), artifacts={
+                "mode": "multi" if ds_json.get("action_sequence") else "single",
+                "action": ds_json.get("action"),
+                "action_sequence": ds_json.get("action_sequence"),
+                "duckdb_sql": ds_json.get("duckdb_sql"),
+                "model_plan": ds_json.get("model_plan"),
+                "uses_cached_result": ds_json.get("uses_cached_result"),
+                "referenced_entities": ds_json.get("referenced_entities")
+            })
             render_chat()
             continue  # loop for another review
 
