@@ -99,9 +99,11 @@ You are the Analytics Manager (AM). Plan how to answer the CEO's business questi
 - Available table schemas
 
 **Context awareness:**
-- FIRST check `shared_context.key_findings` for relevant entities (top_selling_product_id, etc.)
-- Review `shared_context.recent_sql_results` to understand what data was already queried
-- For follow-up questions about "this product" or "this customer", use specific IDs from key findings
+- CHECK `shared_context.context_relevance.question_type` to understand if context should be used
+- If question_type is "broad_analysis" or "new_analysis", context entities will be filtered out
+- If question_type is "specific_entity_reference", use `shared_context.key_findings` for entity IDs
+- If question_type is "explanation", use cached results but ignore specific entity context
+- Review `shared_context.recent_sql_results` only when context_relevance allows it
 - Avoid re-querying data that's already in cached results unless additional detail is needed
 
 **Action classification:** Decide the **granularity** first:
@@ -157,16 +159,22 @@ You are the Data Scientist (DS). Execute the AM plan using shared context and av
 - Available table schemas
 
 **CRITICAL Context Usage:**
-- ALWAYS check `shared_context.key_findings` for relevant entities (top_selling_product_id, etc.)
-- Review `shared_context.recent_sql_results` to avoid duplicate queries
-- For follow-up questions, use specific IDs from key findings (e.g., "this product" = shared_context.key_findings.top_selling_product_id)
-- Reference cached data when available instead of re-querying
+- FIRST check `shared_context.context_relevance.question_type` to determine context usage rules
+- If question_type is "broad_analysis" or "new_analysis": DO NOT use entity IDs, query ALL data
+- If question_type is "specific_entity_reference": Use `shared_context.key_findings` for entity IDs
+- If question_type is "explanation": Use cached results for interpretation
+- Review `shared_context.recent_sql_results` only when context_relevance.rules_applied.use_cached_results is true
+- Reference cached data when available and relevant instead of re-querying
 
 **CRITICAL: Always provide actual SQL queries, never NULL or empty strings.**
 
 **Smart Query Generation:**
-- For follow-ups about "this product/customer", use the specific ID from shared_context.key_findings
-- Build on previous results - if top product is already known, query product details directly
+- Check `shared_context.context_relevance.question_type` FIRST:
+  - "broad_analysis": Query ALL entities without WHERE clauses (e.g., "SELECT * FROM products")
+  - "specific_entity_reference": Use entity IDs from key_findings (e.g., "WHERE product_id = 'specific_id'")
+  - "new_analysis": Ignore previous context, start fresh with full dataset queries
+  - "explanation": Don't query, use cached results
+- Example clustering SQL: "SELECT * FROM products" (NO WHERE clause regardless of context)
 - Example follow-up SQL: "SELECT * FROM products WHERE product_id = '[specific_id_from_context]'"
 - Only run new aggregation queries if the specific data isn't already cached
 
@@ -179,7 +187,9 @@ You are the Data Scientist (DS). Execute the AM plan using shared context and av
 - ALWAYS provide complete, executable SQL queries in duckdb_sql field  
 - Use proper table/column names from schema
 - For entity-specific queries, use exact IDs from shared_context.key_findings
-- Example valid SQL: "SELECT p.product_category_name FROM products p WHERE p.product_id = 'bb50f2e236e5eea0100680137654686c'"
+- For clustering/analysis queries, query ALL entities without WHERE clauses
+- Example entity-specific SQL: "SELECT p.product_category_name FROM products p WHERE p.product_id = 'bb50f2e236e5eea0100680137654686c'"
+- Example clustering SQL: "SELECT p.product_category_name, p.product_weight_g FROM products p" (no WHERE clause)
 - Example multi-table: "SELECT c.customer_id, SUM(oi.price * oi.quantity) as total FROM orders o JOIN order_items oi ON o.order_id = oi.order_id JOIN customers c ON o.customer_id = c.customer_id WHERE oi.product_id = 'bb50f2e236e5eea0100680137654686c' GROUP BY c.customer_id ORDER BY total DESC LIMIT 1"
 
 **Special rules:**
@@ -1499,6 +1509,88 @@ def resolve_contextual_entities(current_question: str, conversation_history: Lis
     }
 
 
+def assess_context_relevance(current_question: str, available_context: dict) -> dict:
+    """Determine which parts of the context are relevant to the current question."""
+    question_lower = current_question.lower()
+
+    # Question type patterns
+    question_patterns = {
+        "specific_entity_reference": ["this", "that", "the product", "the customer", "the order", "it", "its"],
+        "broad_analysis": ["clustering", "segmentation", "all products", "all customers", "analyze", "compare", "distribution"],
+        "new_analysis": ["different", "new", "another", "instead", "change to", "switch to"],
+        "continuation": ["also", "additionally", "furthermore", "next", "then", "continue"],
+        "explanation": ["explain", "why", "how", "what does", "interpret", "meaning"],
+        "overview": ["what data", "show me", "available", "overview", "summary"]
+    }
+
+    # Determine question type
+    question_type = "new_analysis"  # default
+    for pattern_type, keywords in question_patterns.items():
+        if any(keyword in question_lower for keyword in keywords):
+            question_type = pattern_type
+            break
+
+    # Context relevance rules
+    relevance_rules = {
+        "specific_entity_reference": {
+            "use_entity_ids": True,
+            "use_cached_results": True,
+            "filter_by_entity": True
+        },
+        "broad_analysis": {
+            "use_entity_ids": False,
+            "use_cached_results": False,
+            "filter_by_entity": False
+        },
+        "new_analysis": {
+            "use_entity_ids": False,
+            "use_cached_results": False,
+            "filter_by_entity": False
+        },
+        "continuation": {
+            "use_entity_ids": True,
+            "use_cached_results": True,
+            "filter_by_entity": False
+        },
+        "explanation": {
+            "use_entity_ids": False,
+            "use_cached_results": True,
+            "filter_by_entity": False
+        },
+        "overview": {
+            "use_entity_ids": False,
+            "use_cached_results": False,
+            "filter_by_entity": False
+        }
+    }
+
+    rules = relevance_rules.get(question_type, relevance_rules["new_analysis"])
+
+    # Filter context based on relevance
+    filtered_context = available_context.copy()
+
+    if not rules["use_entity_ids"]:
+        # Clear entity IDs if they're not relevant
+        filtered_context["key_findings"] = {}
+        if "conversation_entities" in filtered_context:
+            filtered_context["conversation_entities"]["resolved_entity_ids"] = {}
+
+    if not rules["use_cached_results"]:
+        # Clear cached results if starting fresh analysis
+        filtered_context["cached_results"] = {}
+        filtered_context["recent_sql_results"] = {}
+
+    # Add relevance metadata
+    filtered_context["context_relevance"] = {
+        "question_type": question_type,
+        "rules_applied": rules,
+        "original_context_size": len(str(available_context)),
+        "filtered_context_size": len(str(filtered_context))
+    }
+
+    return filtered_context
+
+
 def build_shared_context() -> Dict[str, Any]:
     """Build comprehensive shared context for all agents."""
     # Get cached approved results
@@ -1984,7 +2076,8 @@ def train_model(df: pd.DataFrame, task: str, target: Optional[str], features: Li
 # AM/DS/Review pipeline
 # ======================
 def run_am_plan(prompt: str, column_hints: dict, context: dict) -> dict:
-    shared_context = build_shared_context()
+    full_context = build_shared_context()
+    shared_context = assess_context_relevance(prompt, full_context)
     payload = {
         "ceo_question": prompt,
         "shared_context": shared_context,
@@ -2038,8 +2131,10 @@ def _normalize_sequence(seq, fallback_action) -> List[dict]:
 
 
 def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
-    shared_context = build_shared_context()
-    
+    current_question = st.session_state.current_question or ""
+    full_context = build_shared_context()
+    shared_context = assess_context_relevance(current_question, full_context)
+
     ds_payload = {
         "am_plan": am_json.get("plan_for_ds", ""),
         "am_next_action_type": am_json.get("next_action_type", "eda"),
@@ -2162,8 +2257,9 @@ def judge_review(user_question: str, am_response: dict, ds_response: dict, table
                     "error": str(e)
                 }
     
-    shared_context = build_shared_context()
-    
+    full_context = build_shared_context()
+    shared_context = assess_context_relevance(user_question, full_context)
+
     # Assess question context for Judge evaluation
     question_lower = user_question.lower()
     is_overview_question = any(phrase in question_lower for phrase in [
@@ -2209,7 +2305,8 @@ def judge_review(user_question: str, am_response: dict, ds_response: dict, table
     return llm_json(SYSTEM_JUDGE, json.dumps(judge_payload))
 
 def am_review(ceo_prompt: str, ds_json: dict, meta: dict) -> dict:
-    shared_context = build_shared_context()
+    full_context = build_shared_context()
+    shared_context = assess_context_relevance(ceo_prompt, full_context)
     bundle = {
         "ceo_question": ceo_prompt,
         "shared_context": shared_context,
@@ -2221,7 +2318,9 @@ def am_review(ceo_prompt: str, ds_json: dict, meta: dict) -> dict:
 
 
 def revise_ds(am_json: dict, prev_ds_json: dict, review_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
-    shared_context = build_shared_context()
+    current_question = st.session_state.current_question or ""
+    full_context = build_shared_context()
+    shared_context = assess_context_relevance(current_question, full_context)
     payload = {
         "am_plan": am_json.get("plan_for_ds", ""),
         "shared_context": shared_context,
