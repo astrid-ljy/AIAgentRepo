@@ -1602,52 +1602,29 @@ def assess_context_relevance(current_question: str, available_context: dict) -> 
 
 
 def get_table_schema_info() -> Dict[str, Dict[str, Any]]:
-    """Get detailed schema information for all available tables."""
+    """Get essential schema information for all available tables (optimized for JSON serialization)."""
     schema_info = {}
     tables = get_all_tables()
 
     for table_name, df in tables.items():
         if df is not None and not df.empty:
-            # Get column info with types and sample values
-            columns_info = {}
-            for col in df.columns:
-                col_info = {
-                    "dtype": str(df[col].dtype),
-                    "null_count": df[col].isnull().sum(),
-                    "unique_count": df[col].nunique(),
-                    "sample_values": []
+            try:
+                schema_info[table_name] = {
+                    "row_count": int(len(df)),
+                    "columns": list(df.columns),
+                    "business_relevant_columns": _identify_business_columns(df.columns.tolist())
                 }
-
-                # Get sample non-null values
-                non_null_values = df[col].dropna()
-                if len(non_null_values) > 0:
-                    sample_size = min(3, len(non_null_values))
-                    col_info["sample_values"] = non_null_values.head(sample_size).tolist()
-
-                columns_info[col] = col_info
-
-            schema_info[table_name] = {
-                "row_count": len(df),
-                "columns": list(df.columns),
-                "column_info": columns_info,
-                "primary_key_candidates": _identify_primary_key_candidates(df),
-                "business_relevant_columns": _identify_business_columns(df.columns.tolist())
-            }
+            except Exception as e:
+                # Fallback to basic info if there's any serialization issue
+                schema_info[table_name] = {
+                    "row_count": len(df),
+                    "columns": list(df.columns),
+                    "business_relevant_columns": {}
+                }
 
     return schema_info
 
 
-def _identify_primary_key_candidates(df: pd.DataFrame) -> List[str]:
-    """Identify potential primary key columns."""
-    candidates = []
-    for col in df.columns:
-        # Check if column might be a primary key
-        if (col.lower().endswith('_id') or col.lower() == 'id' or
-            col.lower().endswith('_key') or 'unique' in col.lower()):
-            # Check uniqueness
-            if df[col].nunique() == len(df) and df[col].notnull().all():
-                candidates.append(col)
-    return candidates
 
 
 def _identify_business_columns(columns: List[str]) -> Dict[str, List[str]]:
