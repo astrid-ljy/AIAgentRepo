@@ -94,12 +94,14 @@ You are the Analytics Manager (AM). Plan how to answer the CEO's business questi
 
 **Inputs you receive:**
 - CEO's current question and conversation history
-- `shared_context`: Contains cached results, recent SQL queries, key findings, and extracted entities
+- `shared_context`: Contains cached results, recent SQL queries, key findings, extracted entities, schema_info, and suggested_columns
 - `column_hints`: Business term to column mappings
-- Available table schemas
+- Available table schemas with detailed column information
 
-**Context awareness:**
+**Context and Schema awareness:**
 - CHECK `shared_context.context_relevance.question_type` to understand if context should be used
+- ALWAYS review `shared_context.schema_info` to understand available data structure
+- Use `shared_context.suggested_columns` to identify relevant columns for the business question
 - If question_type is "broad_analysis" or "new_analysis", context entities will be filtered out
 - If question_type is "specific_entity_reference", use `shared_context.key_findings` for entity IDs
 - If question_type is "explanation", use cached results but ignore specific entity context
@@ -168,15 +170,22 @@ You are the Data Scientist (DS). Execute the AM plan using shared context and av
 
 **CRITICAL: Always provide actual SQL queries, never NULL or empty strings.**
 
-**Smart Query Generation:**
-- Check `shared_context.context_relevance.question_type` FIRST:
-  - "broad_analysis": Query ALL entities without WHERE clauses (e.g., "SELECT * FROM products")
-  - "specific_entity_reference": Use entity IDs from key_findings (e.g., "WHERE product_id = 'specific_id'")
-  - "new_analysis": Ignore previous context, start fresh with full dataset queries
-  - "explanation": Don't query, use cached results
-- Example clustering SQL: "SELECT * FROM products" (NO WHERE clause regardless of context)
-- Example follow-up SQL: "SELECT * FROM products WHERE product_id = '[specific_id_from_context]'"
-- Only run new aggregation queries if the specific data isn't already cached
+**Smart Query Generation Process:**
+1. Check `shared_context.context_relevance.question_type` FIRST
+2. Check `shared_context.schema_info` for available tables and columns
+3. Use `shared_context.suggested_columns` to identify relevant columns for your query intent
+4. Build SQL using ONLY verified column names from schema_info
+
+**Query Type Rules:**
+- "broad_analysis": Query ALL entities without WHERE clauses, use suggested_columns for relevant metrics
+- "specific_entity_reference": Use entity IDs from key_findings + suggested_columns
+- "new_analysis": Use schema_info to start fresh with full dataset queries
+- "explanation": Don't query, use cached results
+
+**Example Process for "top selling product":**
+1. Check schema_info["olist_order_items_dataset"]["columns"] for available columns
+2. Use suggested_columns["olist_order_items_dataset"] for sales-related columns
+3. Build SQL like: "SELECT product_id, SUM(price) as total_sales FROM olist_order_items_dataset GROUP BY product_id ORDER BY total_sales DESC LIMIT 1"
 
 **Execution modes:**
 - If AM provided `am_action_sequence`, return matching `action_sequence`. Otherwise, return single `action`
@@ -184,13 +193,14 @@ You are the Data Scientist (DS). Execute the AM plan using shared context and av
 
 **CRITICAL SQL Requirements:**
 - NEVER return NULL, empty, or missing duckdb_sql values - this is a critical error
-- ALWAYS provide complete, executable SQL queries in duckdb_sql field  
-- Use proper table/column names from schema
+- ALWAYS check `shared_context.schema_info` and `shared_context.suggested_columns` FIRST before writing SQL
+- Use ONLY actual column names that exist in the schema - never assume columns exist
+- Check `shared_context.schema_info[table_name].columns` for exact column names
+- Use `shared_context.suggested_columns[table_name]` for business-relevant columns for your query
 - For entity-specific queries, use exact IDs from shared_context.key_findings
 - For clustering/analysis queries, query ALL entities without WHERE clauses
-- Example entity-specific SQL: "SELECT p.product_category_name FROM products p WHERE p.product_id = 'bb50f2e236e5eea0100680137654686c'"
-- Example clustering SQL: "SELECT p.product_category_name, p.product_weight_g FROM products p" (no WHERE clause)
-- Example multi-table: "SELECT c.customer_id, SUM(oi.price * oi.quantity) as total FROM orders o JOIN order_items oi ON o.order_id = oi.order_id JOIN customers c ON o.customer_id = c.customer_id WHERE oi.product_id = 'bb50f2e236e5eea0100680137654686c' GROUP BY c.customer_id ORDER BY total DESC LIMIT 1"
+- Example: For "top selling product", check schema_info for price/sales columns, then use actual column names
+- ALWAYS validate column existence before using in SQL queries
 
 **Special rules:**
 - Data Inventory: Overview with first 5 rows for each table
@@ -1591,6 +1601,138 @@ def assess_context_relevance(current_question: str, available_context: dict) -> 
     return filtered_context
 
 
+def get_table_schema_info() -> Dict[str, Dict[str, Any]]:
+    """Get detailed schema information for all available tables."""
+    schema_info = {}
+    tables = get_all_tables()
+
+    for table_name, df in tables.items():
+        if df is not None and not df.empty:
+            # Get column info with types and sample values
+            columns_info = {}
+            for col in df.columns:
+                col_info = {
+                    "dtype": str(df[col].dtype),
+                    "null_count": df[col].isnull().sum(),
+                    "unique_count": df[col].nunique(),
+                    "sample_values": []
+                }
+
+                # Get sample non-null values
+                non_null_values = df[col].dropna()
+                if len(non_null_values) > 0:
+                    sample_size = min(3, len(non_null_values))
+                    col_info["sample_values"] = non_null_values.head(sample_size).tolist()
+
+                columns_info[col] = col_info
+
+            schema_info[table_name] = {
+                "row_count": len(df),
+                "columns": list(df.columns),
+                "column_info": columns_info,
+                "primary_key_candidates": _identify_primary_key_candidates(df),
+                "business_relevant_columns": _identify_business_columns(df.columns.tolist())
+            }
+
+    return schema_info
+
+
+def _identify_primary_key_candidates(df: pd.DataFrame) -> List[str]:
+    """Identify potential primary key columns."""
+    candidates = []
+    for col in df.columns:
+        # Check if column might be a primary key
+        if (col.lower().endswith('_id') or col.lower() == 'id' or
+            col.lower().endswith('_key') or 'unique' in col.lower()):
+            # Check uniqueness
+            if df[col].nunique() == len(df) and df[col].notnull().all():
+                candidates.append(col)
+    return candidates
+
+
+def _identify_business_columns(columns: List[str]) -> Dict[str, List[str]]:
+    """Categorize columns by business meaning."""
+    categories = {
+        "sales_metrics": [],
+        "quantity_metrics": [],
+        "price_metrics": [],
+        "date_columns": [],
+        "id_columns": [],
+        "category_columns": [],
+        "location_columns": []
+    }
+
+    for col in columns:
+        col_lower = col.lower()
+
+        # Sales-related
+        if any(term in col_lower for term in ['sales', 'revenue', 'total', 'amount']):
+            categories["sales_metrics"].append(col)
+
+        # Quantity-related
+        elif any(term in col_lower for term in ['qty', 'quantity', 'count', 'volume', 'units']):
+            categories["quantity_metrics"].append(col)
+
+        # Price-related
+        elif any(term in col_lower for term in ['price', 'cost', 'value', 'freight']):
+            categories["price_metrics"].append(col)
+
+        # Date-related
+        elif any(term in col_lower for term in ['date', 'time', 'created', 'updated']):
+            categories["date_columns"].append(col)
+
+        # ID columns
+        elif col_lower.endswith('_id') or col_lower == 'id':
+            categories["id_columns"].append(col)
+
+        # Category columns
+        elif any(term in col_lower for term in ['category', 'type', 'status', 'state']):
+            categories["category_columns"].append(col)
+
+        # Location columns
+        elif any(term in col_lower for term in ['city', 'state', 'zip', 'location', 'address']):
+            categories["location_columns"].append(col)
+
+    return categories
+
+
+def suggest_columns_for_query(intent: str, table_schema: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+    """Suggest appropriate columns based on query intent and available schema."""
+    suggestions = {}
+
+    intent_lower = intent.lower()
+
+    for table_name, schema in table_schema.items():
+        table_suggestions = []
+        business_cols = schema.get("business_relevant_columns", {})
+
+        # Sales analysis
+        if any(term in intent_lower for term in ['sales', 'selling', 'revenue', 'top product']):
+            # Prefer sales metrics, then price metrics
+            table_suggestions.extend(business_cols.get("sales_metrics", []))
+            table_suggestions.extend(business_cols.get("price_metrics", []))
+
+        # Quantity analysis
+        elif any(term in intent_lower for term in ['quantity', 'volume', 'units', 'count']):
+            table_suggestions.extend(business_cols.get("quantity_metrics", []))
+
+        # Category analysis
+        elif any(term in intent_lower for term in ['category', 'type', 'group']):
+            table_suggestions.extend(business_cols.get("category_columns", []))
+
+        # Location analysis
+        elif any(term in intent_lower for term in ['location', 'city', 'state', 'geographic']):
+            table_suggestions.extend(business_cols.get("location_columns", []))
+
+        # Always include ID columns for joins
+        table_suggestions.extend(business_cols.get("id_columns", []))
+
+        if table_suggestions:
+            suggestions[table_name] = list(set(table_suggestions))  # Remove duplicates
+
+    return suggestions
+
+
 def build_shared_context() -> Dict[str, Any]:
     """Build comprehensive shared context for all agents."""
     # Get cached approved results
@@ -1667,6 +1809,13 @@ def build_shared_context() -> Dict[str, Any]:
             "context_complete": has_reference and has_resolved_id
         }
     
+    # Get detailed schema information
+    schema_info = get_table_schema_info()
+
+    # Generate column suggestions for current question
+    current_question = st.session_state.current_question or ""
+    column_suggestions = suggest_columns_for_query(current_question, schema_info) if current_question else {}
+
     return {
         "cached_results": cached_results,
         "recent_sql_results": recent_sql_results,
@@ -1679,6 +1828,8 @@ def build_shared_context() -> Dict[str, Any]:
             "question_flow_summary": f"Previous: {' -> '.join(recent_questions[-2:])}, Current: {current_q}" if recent_questions else f"Current: {current_q}"
         },
         "available_tables": {k: list(v.columns) for k, v in get_all_tables().items()},
+        "schema_info": schema_info,
+        "suggested_columns": column_suggestions,
         "context_timestamp": pd.Timestamp.now().isoformat()
     }
 
