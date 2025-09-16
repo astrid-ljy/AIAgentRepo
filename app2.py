@@ -807,7 +807,11 @@ st.title("🏢 CEO ↔ AM ↔ DS — Profit Assistant")
 
 with st.sidebar:
     st.header("⚙️ Data")
-    zip_file = st.file_uploader("Upload ZIP of CSVs", type=["zip"])
+    uploaded_file = st.file_uploader(
+        "Upload Data File",
+        type=["zip", "csv", "xlsx", "xls", "json", "jsonl", "tsv", "txt", "parquet"],
+        help="Supports: ZIP (containing CSVs), CSV, Excel (.xlsx/.xls), JSON, JSONL, TSV, TXT, and Parquet files"
+    )
     st.header("🧠 Model")
     model   = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     api_key = st.text_input("OPENAI_API_KEY", value=OPENAI_API_KEY, type="password")
@@ -930,6 +934,98 @@ def load_zip_tables(file) -> Dict[str, pd.DataFrame]:
                 key = f"{base}_{i}"; i += 1
             tables[key] = df
     return tables
+
+
+def load_data_file(file) -> Dict[str, pd.DataFrame]:
+    """Load data from various file formats commonly used in corporate environments"""
+    if file is None:
+        return {}
+
+    filename = file.name.lower()
+    file_ext = os.path.splitext(filename)[1]
+    base_name = os.path.splitext(os.path.basename(filename))[0]
+
+    try:
+        if file_ext == '.zip':
+            # Use existing ZIP handling
+            return load_zip_tables(file)
+
+        elif file_ext == '.csv':
+            df = pd.read_csv(file)
+            return {base_name: df}
+
+        elif file_ext in ['.xlsx', '.xls']:
+            # Handle Excel files - read all sheets
+            excel_file = pd.ExcelFile(file)
+            tables = {}
+            for sheet_name in excel_file.sheet_names:
+                df = pd.read_excel(file, sheet_name=sheet_name)
+                key = f"{base_name}_{sheet_name}" if len(excel_file.sheet_names) > 1 else base_name
+                tables[key] = df
+            return tables
+
+        elif file_ext == '.json':
+            # Handle JSON files
+            data = json.load(file)
+            if isinstance(data, list):
+                # List of records
+                df = pd.DataFrame(data)
+            elif isinstance(data, dict):
+                # Could be nested structure - try to flatten
+                df = pd.json_normalize(data)
+            else:
+                # Fallback - create single row DataFrame
+                df = pd.DataFrame([data])
+            return {base_name: df}
+
+        elif file_ext == '.jsonl':
+            # Handle JSON Lines files
+            lines = []
+            file.seek(0)  # Reset file pointer
+            for line in file:
+                if isinstance(line, bytes):
+                    line = line.decode('utf-8')
+                line = line.strip()
+                if line:
+                    lines.append(json.loads(line))
+            df = pd.DataFrame(lines)
+            return {base_name: df}
+
+        elif file_ext == '.tsv':
+            df = pd.read_csv(file, sep='\t')
+            return {base_name: df}
+
+        elif file_ext == '.txt':
+            # Try to detect delimiter
+            file.seek(0)
+            sample = file.read(1024)
+            if isinstance(sample, bytes):
+                sample = sample.decode('utf-8')
+            file.seek(0)
+
+            # Common delimiters in corporate files
+            if '\t' in sample:
+                df = pd.read_csv(file, sep='\t')
+            elif '|' in sample:
+                df = pd.read_csv(file, sep='|')
+            elif ';' in sample:
+                df = pd.read_csv(file, sep=';')
+            else:
+                # Default to comma
+                df = pd.read_csv(file)
+            return {base_name: df}
+
+        elif file_ext == '.parquet':
+            df = pd.read_parquet(file)
+            return {base_name: df}
+
+        else:
+            st.error(f"Unsupported file type: {file_ext}")
+            return {}
+
+    except Exception as e:
+        st.error(f"Error loading file {filename}: {str(e)}")
+        return {}
 
 
 def get_all_tables() -> Dict[str, pd.DataFrame]:
@@ -1499,6 +1595,47 @@ def add_msg(role, content, artifacts=None):
     st.session_state.chat.append({"role": role, "content": content, "artifacts": artifacts or {}})
 
 
+def generate_artifact_summary(artifacts):
+    """Generate a plain English summary of what someone is doing based on artifacts"""
+    if not artifacts:
+        return None
+
+    # Handle different types of artifacts
+    if "action" in artifacts:
+        action = artifacts.get("action", "")
+        if action == "sql":
+            return "Analyst is running SQL queries to analyze data"
+        elif action == "clustering":
+            return "Data scientist is grouping similar data points together"
+        elif action == "modeling":
+            return "ML engineer is building a predictive model"
+        elif action == "eda":
+            return "Analyst is exploring the data to understand patterns"
+
+    if "action_sequence" in artifacts:
+        return "Data team is executing a multi-step analysis plan"
+
+    if "sql" in artifacts:
+        return "Database analyst is querying the data"
+
+    if "model_report" in artifacts:
+        return "ML engineer completed model training and evaluation"
+
+    if "keywords" in artifacts:
+        return "Text analyst extracted key themes from customer reviews"
+
+    if "judgment" in artifacts:
+        return "Quality reviewer is assessing the analysis results"
+
+    if "central_question" in artifacts:
+        return "System updated the context with new information"
+
+    if "explain_used" in artifacts:
+        return "Analyst provided interpretation using cached results"
+
+    # Default fallback
+    return "Team member is working on data analysis tasks"
+
 def render_chat(incremental: bool = True):
     msgs = st.session_state.chat
     start = st.session_state.last_rendered_idx if incremental else 0
@@ -1506,8 +1643,10 @@ def render_chat(incremental: bool = True):
         with st.chat_message(m["role"]):
             st.write(m["content"])
             if m.get("artifacts"):
-                with st.expander("Artifacts", expanded=False):
-                    st.json(m["artifacts"])
+                summary = generate_artifact_summary(m["artifacts"])
+                if summary:
+                    with st.expander(summary, expanded=False):
+                        st.json(m["artifacts"])
     st.session_state.last_rendered_idx = len(msgs)
 
 
@@ -2777,10 +2916,11 @@ def run_turn_ceo(new_text: str):
 # Data loading
 # ======================
 def load_if_needed():
-    if zip_file and st.session_state.tables_raw is None:
-        st.session_state.tables_raw = load_zip_tables(zip_file)
+    if uploaded_file and st.session_state.tables_raw is None:
+        st.session_state.tables_raw = load_data_file(uploaded_file)
         st.session_state.tables = get_all_tables()
-        add_msg("system", f"Loaded {len(st.session_state.tables_raw)} raw tables.")
+        file_type = os.path.splitext(uploaded_file.name)[1].upper()
+        add_msg("system", f"Loaded {len(st.session_state.tables_raw)} tables from {file_type} file: {uploaded_file.name}")
         render_chat()
 
 load_if_needed()
