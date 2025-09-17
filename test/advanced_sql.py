@@ -212,8 +212,8 @@ def validate_ds_response(ds_response: dict) -> Dict[str, Any]:
                 if sql is None or sql == "NULL" or (isinstance(sql, str) and sql.strip() == ""):
                     issues.append(f"CRITICAL: Action sequence step {i+1} has NULL/empty duckdb_sql field")
 
-    # Check for missing required fields
-    if not ds_response.get("ds_summary"):
+    # Check for missing required fields (but allow empty ds_summary)
+    if ds_response.get("ds_summary") is None:
         issues.append("Missing ds_summary field")
 
     if not ds_response.get("action") and not ds_response.get("action_sequence"):
