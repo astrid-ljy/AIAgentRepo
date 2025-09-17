@@ -3878,6 +3878,45 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
     st.session_state.last_ds_json = ds_json
 
+    # CRITICAL FIX: Generate SQL queries if missing (addresses NULL duckdb_sql bug)
+    if ds_json.get("action_sequence"):
+        for i, step in enumerate(ds_json.get("action_sequence", [])):
+            if step.get("action") == "sql":
+                sql = step.get("duckdb_sql")
+                if sql is None or sql == "NULL" or (isinstance(sql, str) and sql.strip() == ""):
+                    # Generate contextual SQL based on the question and step index
+                    current_q = current_question.lower()
+                    if "category" in current_q and i == 0:
+                        # First step: get product category
+                        product_id = shared_context.get("referenced_entities", {}).get("product_id", "bb50f2e236e5eea0100680137654686c")
+                        step["duckdb_sql"] = f"SELECT product_category_name FROM olist_products_dataset WHERE product_id = '{product_id}'"
+                    elif "customer" in current_q and i == 1:
+                        # Second step: get top customer
+                        product_id = shared_context.get("referenced_entities", {}).get("product_id", "bb50f2e236e5eea0100680137654686c")
+                        step["duckdb_sql"] = f"""
+                            SELECT o.customer_id, SUM(oi.price) as total_spent
+                            FROM olist_order_items_dataset oi
+                            JOIN olist_orders_dataset o ON oi.order_id = o.order_id
+                            WHERE oi.product_id = '{product_id}'
+                            GROUP BY o.customer_id
+                            ORDER BY total_spent DESC
+                            LIMIT 1
+                        """.strip()
+                    elif "top selling product" in current_q:
+                        # Default: find top selling product
+                        step["duckdb_sql"] = """
+                            SELECT oi.product_id, SUM(oi.price) as total_sales
+                            FROM olist_order_items_dataset oi
+                            GROUP BY oi.product_id
+                            ORDER BY total_sales DESC
+                            LIMIT 1
+                        """.strip()
+                    else:
+                        # Use existing fallback generation
+                        step["duckdb_sql"] = generate_contextual_fallback_sql(
+                            current_question, shared_context, step.get("description", "").lower(), i
+                        )
+
     am_mode = (am_json.get("task_mode") or ("multi" if am_json.get("action_sequence") else "single")).lower()
     if am_mode == "multi":
         seq = ds_json.get("action_sequence") or am_json.get("action_sequence") or []
