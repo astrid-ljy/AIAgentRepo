@@ -292,8 +292,13 @@ def main():
     render_chat()
 
     # Main input
-    if prompt := st.chat_input("Ask your business question..."):
-        run_turn_ceo(prompt)
+    with st.container():
+        prompt = st.chat_input("Ask your business question...")
+        if prompt:
+            # Show the user's question immediately
+            add_msg("user", prompt)
+            render_chat()
+            run_turn_ceo(prompt)
 
 if __name__ == "__main__":
     main()
