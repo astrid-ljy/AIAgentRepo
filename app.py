@@ -4649,12 +4649,35 @@ def run_turn_ceo(new_text: str):
             return
             
         if ds_json_local.get("action_sequence"):
+            results_summary = []
             for step in ds_json_local.get("action_sequence")[:5]:
                 # Cache each step result with approval
                 action_id = f"{step.get('action', 'unknown')}_{len(st.session_state.executed_results)}"
                 cache_result_with_approval(action_id, step, approved=True)
+
+                # Execute and capture SQL results for summary
+                if step.get("action") == "sql":
+                    sql = step.get("duckdb_sql")
+                    if sql:
+                        try:
+                            result_df = run_duckdb_sql(sql)
+                            if len(result_df) > 0:
+                                if "category" in sql.lower():
+                                    category = result_df.iloc[0]['product_category_name'] if 'product_category_name' in result_df.columns else "Unknown"
+                                    results_summary.append(f"Product category: {category}")
+                                elif "customer" in sql.lower():
+                                    customer_id = result_df.iloc[0]['customer_id'] if 'customer_id' in result_df.columns else "Unknown"
+                                    total_spent = result_df.iloc[0].get('total_spent', 'N/A')
+                                    results_summary.append(f"Top customer: {customer_id} (spent: ${total_spent})")
+                                else:
+                                    results_summary.append(f"SQL executed: {len(result_df)} rows returned")
+                        except Exception as e:
+                            results_summary.append(f"SQL execution error: {str(e)}")
+
                 render_final_for_action(step)
-            add_msg("system", "✅ Judge-approved multi-step results rendered.")
+
+            summary_text = "; ".join(results_summary) if results_summary else "Multi-step analysis completed"
+            add_msg("system", f"✅ Judge-approved multi-step results rendered. {summary_text}")
             render_chat()
         else:
             if not ds_json_local.get("action"):
