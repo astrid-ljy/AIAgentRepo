@@ -141,6 +141,11 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
         "column_hints": column_hints,
     }
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
+
+    # Ensure ds_summary exists (fallback if missing)
+    if not ds_json.get("ds_summary"):
+        ds_json["ds_summary"] = "Executing analysis to answer your question"
+
     st.session_state.last_ds_json = ds_json
 
     # CRITICAL FIX: Generate SQL queries if missing (addresses NULL duckdb_sql bug)
