@@ -295,7 +295,13 @@ When using data_preparation action, the system will:
 - Explain: Read cached results and interpret without recomputing
 - Entity continuity: "this product" MUST use product_id from shared_context.key_findings
 - Keyword Extraction: For review analysis, use multi-step approach: 1) SQL to get reviews, 2) keyword_extraction action to process text
-- ALWAYS preserve referenced_entities from AM plan (use am_plan.referenced_entities if available)
+- ALWAYS preserve referenced_entities from AM plan (use am_referenced_entities if available)
+
+**CRITICAL: When AM provides specific entity IDs, USE THEM:**
+- If am_referenced_entities contains product_id, use it in WHERE clauses: WHERE product_id = 'specific_id'
+- If am_referenced_entities contains customer_id, use it in WHERE clauses: WHERE customer_id = 'specific_id'
+- DO NOT generate generic queries when specific IDs are provided
+- Example: If product_id = 'bb50f2e236e5eea0100680137654686c', use WHERE product_id = 'bb50f2e236e5eea0100680137654686c'
 
 **CRITICAL: When using action_sequence, format MUST be:**
 ```json
@@ -312,6 +318,26 @@ When using data_preparation action, the system will:
       "description": "Next step description"
     }
   ]
+}
+```
+
+**Example for product category + top customer queries:**
+If am_referenced_entities = {"product_id": "bb50f2e236e5eea0100680137654686c"}:
+```json
+{
+  "action_sequence": [
+    {
+      "action": "sql",
+      "duckdb_sql": "SELECT product_category_name FROM olist_products_dataset WHERE product_id = 'bb50f2e236e5eea0100680137654686c'",
+      "description": "Get category for specific product"
+    },
+    {
+      "action": "sql",
+      "duckdb_sql": "SELECT o.customer_id, SUM(oi.price) as total_spent FROM olist_order_items_dataset oi JOIN olist_orders_dataset o ON oi.order_id = o.order_id WHERE oi.product_id = 'bb50f2e236e5eea0100680137654686c' GROUP BY o.customer_id ORDER BY total_spent DESC LIMIT 1",
+      "description": "Get top customer for specific product"
+    }
+  ],
+  "referenced_entities": {"product_id": "bb50f2e236e5eea0100680137654686c"}
 }
 ```
 
