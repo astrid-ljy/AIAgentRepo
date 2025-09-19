@@ -4059,7 +4059,23 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     # Add format validation reminder
     user_message += "\n\nREMINDER: action_sequence must be array of objects with action, duckdb_sql, description fields. Never return strings in action_sequence."
 
+    # DEBUG: Show what we're actually sending to DS agent
+    st.write("🔍 **DEBUG - Final User Message to DS Agent:**")
+    st.write(f"Length: {len(user_message)} chars")
+    if "IMPORTANT: Use these specific entity IDs" in user_message:
+        st.write("✅ Entity reminder is included")
+    else:
+        st.write("❌ Entity reminder is missing")
+    if "REMINDER: action_sequence must be array of objects" in user_message:
+        st.write("✅ Format reminder is included")
+    else:
+        st.write("❌ Format reminder is missing")
+
     ds_json = llm_json(SYSTEM_DS, user_message)
+
+    # IMMEDIATE DEBUG: Raw DS response before any processing
+    st.write("🚨 **IMMEDIATE DEBUG - Raw DS Response:**")
+    st.json(ds_json)
 
     # DEBUG: Log what DS agent returned
     st.write("🔍 **DEBUG - DS Agent Output:**")
