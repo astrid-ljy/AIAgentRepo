@@ -309,7 +309,16 @@ When using data_preparation action, the system will:
 - DO NOT generate generic queries when specific IDs are provided
 - Example: If product_id = 'bb50f2e236e5eea0100680137654686c', use WHERE product_id = 'bb50f2e236e5eea0100680137654686c'
 
-**CRITICAL: When using action_sequence, format MUST be:**
+**CRITICAL: action_sequence MUST be array of OBJECTS, NOT strings:**
+
+❌ WRONG:
+```json
+{
+  "action_sequence": ["sql (get category)", "sql (get customer)"]
+}
+```
+
+✅ CORRECT:
 ```json
 {
   "action_sequence": [
@@ -326,6 +335,8 @@ When using data_preparation action, the system will:
   ]
 }
 ```
+
+NEVER return action_sequence as strings - always as objects with action, duckdb_sql, description fields.
 
 **Example for product category + top customer queries:**
 If am_referenced_entities = {"product_id": "bb50f2e236e5eea0100680137654686c"}:
@@ -3934,20 +3945,25 @@ def _normalize_sequence(seq, fallback_action) -> List[dict]:
                 action_desc = str(raw).lower() if isinstance(raw, str) else str(raw.get("action", "")).lower()
                 current_q = getattr(st.session_state, 'current_question', '').lower()
 
-                # Generate SQL based on action description and step position
+                # Get product_id from AM plan referenced entities (use this first!)
+                am_entities = getattr(st.session_state, 'last_am_json', {}).get('referenced_entities', {})
+                product_id = am_entities.get('product_id', 'bb50f2e236e5eea0100680137654686c')
+
+                # Generate SQL based on action description and step position - USE SPECIFIC PRODUCT ID
                 if "category" in action_desc or ("category" in current_q and i == 0):
-                    sql_query = "SELECT product_category_name FROM olist_products_dataset WHERE product_id = 'bb50f2e236e5eea0100680137654686c'"
+                    sql_query = f"SELECT product_category_name FROM olist_products_dataset WHERE product_id = '{product_id}'"
                 elif "customer" in action_desc or "contributor" in action_desc or ("customer" in current_q and i == 1):
-                    sql_query = """
+                    sql_query = f"""
                         SELECT o.customer_id, SUM(oi.price) as total_spent
                         FROM olist_order_items_dataset oi
                         JOIN olist_orders_dataset o ON oi.order_id = o.order_id
-                        WHERE oi.product_id = 'bb50f2e236e5eea0100680137654686c'
+                        WHERE oi.product_id = '{product_id}'
                         GROUP BY o.customer_id
                         ORDER BY total_spent DESC
                         LIMIT 1
                     """.strip()
-                elif "top selling product" in current_q:
+                elif "top selling product" in current_q and not product_id:
+                    # Only use generic query if no specific product ID provided
                     sql_query = """
                         SELECT oi.product_id, SUM(oi.price) as total_sales, COUNT(*) as order_count
                         FROM olist_order_items_dataset oi
@@ -4040,6 +4056,9 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
         entity_reminder = f"\n\nIMPORTANT: Use these specific entity IDs in your queries: {entities}"
         user_message += entity_reminder
 
+    # Add format validation reminder
+    user_message += "\n\nREMINDER: action_sequence must be array of objects with action, duckdb_sql, description fields. Never return strings in action_sequence."
+
     ds_json = llm_json(SYSTEM_DS, user_message)
 
     # DEBUG: Log what DS agent returned
@@ -4048,6 +4067,17 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     st.write(f"- DS Action Sequence: {ds_json.get('action_sequence', 'MISSING')}")
     st.write(f"- DS Sequence: {ds_json.get('sequence', 'MISSING')}")
     st.write(f"- DS Summary: {ds_json.get('ds_summary', 'MISSING')}")
+
+    # Validate action_sequence format
+    if ds_json.get("action_sequence"):
+        action_seq = ds_json.get("action_sequence")
+        if isinstance(action_seq, list) and len(action_seq) > 0:
+            if isinstance(action_seq[0], str):
+                st.error("❌ DS AGENT FORMAT ERROR: action_sequence contains strings instead of objects!")
+                st.write(f"Got: {action_seq}")
+                st.write("Expected: Array of objects with 'action', 'duckdb_sql', 'description' fields")
+            else:
+                st.success("✅ DS agent returned proper action_sequence format (objects)")
 
     if ds_json.get("sequence"):
         st.write("🔍 **DEBUG - Sequence Steps:**")
