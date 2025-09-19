@@ -184,8 +184,14 @@ Return ONLY a single JSON object. The word "json" is present here to satisfy the
 SYSTEM_DS = """
 You are the Data Scientist (DS). Execute the AM plan using shared context and available data.
 
+**FIRST CHECK: am_referenced_entities**
+- If am_referenced_entities contains specific IDs (product_id, customer_id), YOU MUST USE THEM
+- These are specific entities the AM identified - do not ignore them
+- Use them in WHERE clauses for targeted queries
+
 **Inputs you receive:**
 - AM plan with `am_next_action_type` OR `am_action_sequence`
+- `am_referenced_entities`: Specific entity IDs to use in queries
 - `shared_context`: Comprehensive context with cached results, recent SQL queries, key findings, and extracted entities
 - Available table schemas
 
@@ -1060,6 +1066,23 @@ def llm_json(system_prompt: str, user_payload: str) -> dict:
             st.write(f"- Has schema_info: {bool(shared_ctx.get('schema_info'))}")
             st.write(f"- Has suggested_columns: {bool(shared_ctx.get('suggested_columns'))}")
             st.write(f"- Has context_relevance: {bool(shared_ctx.get('context_relevance'))}")
+
+            # Show the actual payload structure
+            st.write("🔍 **Full DS Payload Structure:**")
+            for key in payload_data.keys():
+                value = payload_data[key]
+                if isinstance(value, dict):
+                    st.write(f"  - {key}: (dict with {len(value)} keys)")
+                    if key == 'shared_context':
+                        st.write(f"    shared_context keys: {list(value.keys())}")
+                        if 'key_findings' in value:
+                            st.write(f"    key_findings: {value.get('key_findings', 'NONE')}")
+                        if 'referenced_entities' in value:
+                            st.write(f"    referenced_entities: {value.get('referenced_entities', 'NONE')}")
+                elif isinstance(value, list):
+                    st.write(f"  - {key}: (list with {len(value)} items)")
+                else:
+                    st.write(f"  - {key}: {str(value)[:100]}...")
 
         except Exception as e:
             st.write(f"- Could not parse user payload as JSON: {e}")
@@ -4008,7 +4031,16 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     if shared_context.get("referenced_entities"):
         st.write(f"- Shared Context Referenced Entities: {shared_context['referenced_entities']}")
 
-    ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
+    # Create explicit user message highlighting the referenced entities
+    user_message = json.dumps(ds_payload)
+
+    # Add explicit reminder about referenced entities if they exist
+    if ds_payload.get('am_referenced_entities'):
+        entities = ds_payload['am_referenced_entities']
+        entity_reminder = f"\n\nIMPORTANT: Use these specific entity IDs in your queries: {entities}"
+        user_message += entity_reminder
+
+    ds_json = llm_json(SYSTEM_DS, user_message)
 
     # DEBUG: Log what DS agent returned
     st.write("🔍 **DEBUG - DS Agent Output:**")
