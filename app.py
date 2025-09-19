@@ -3399,10 +3399,10 @@ def generate_artifact_summary(artifacts):
         return "Text analyst extracted key themes from customer reviews"
 
     if "judgment" in artifacts:
-        return "Quality reviewer is assessing the analysis results"
+        return None  # Hide verbose quality assessment messages
 
     if "central_question" in artifacts:
-        return "System updated the context with new information"
+        return None  # Hide verbose context update messages
 
     if "explain_used" in artifacts:
         return "Analyst provided interpretation using cached results"
@@ -4579,12 +4579,7 @@ def run_turn_ceo(new_text: str):
     if new_text and new_text not in st.session_state.prior_questions:
         st.session_state.prior_questions.append(new_text)
 
-    add_msg("system", "Context updated: central question & history considered.", artifacts={
-        "intent": intent, "related": related,
-        "central_question": st.session_state.central_question,
-        "current_question": st.session_state.current_question,
-    })
-    render_chat()
+    # Context update - no verbose message needed
 
     effective_q = st.session_state.current_question
 
