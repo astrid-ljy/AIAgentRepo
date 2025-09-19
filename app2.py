@@ -991,6 +991,34 @@ def llm_json(system_prompt: str, user_payload: str) -> dict:
     sys_msg = system_prompt.strip() + "\n\nReturn ONLY a single JSON object. This line contains the word json."
     user_msg = (user_payload or "").strip() + "\n\nPlease respond with JSON only (a single object)."
 
+    # DEBUG: Log LLM input/output for DS agent calls
+    is_ds_call = ("Data Scientist" in system_prompt or "DS Agent" in system_prompt or
+                  "You are the Data Scientist (DS)" in system_prompt)
+
+    if is_ds_call:
+        st.write("🔍 **DEBUG - DS Agent LLM Call:**")
+        st.write(f"- Model: {model}")
+        st.write(f"- System prompt length: {len(sys_msg)} chars")
+        st.write(f"- User payload length: {len(user_msg)} chars")
+        st.write(f"- System prompt starts: {sys_msg[:100]}...")
+
+        # Show key parts of the payload
+        try:
+            payload_data = json.loads(user_payload)
+            st.write(f"- AM Action Sequence in payload: {payload_data.get('am_action_sequence', 'MISSING')}")
+            st.write(f"- AM Next Action in payload: {payload_data.get('am_next_action_type', 'MISSING')}")
+            st.write(f"- AM Plan in payload: {payload_data.get('am_plan', 'MISSING')}")
+
+            # Check if data schema is included
+            shared_ctx = payload_data.get('shared_context', {})
+            st.write(f"- Has schema_info: {bool(shared_ctx.get('schema_info'))}")
+            st.write(f"- Has suggested_columns: {bool(shared_ctx.get('suggested_columns'))}")
+            st.write(f"- Has context_relevance: {bool(shared_ctx.get('context_relevance'))}")
+
+        except Exception as e:
+            st.write(f"- Could not parse user payload as JSON: {e}")
+            st.write(f"- Raw payload: {user_payload[:200]}...")
+
     # Preferred structured call
     try:
         resp = client.chat.completions.create(
@@ -1002,7 +1030,26 @@ def llm_json(system_prompt: str, user_payload: str) -> dict:
             ],
             temperature=0.0,
         )
-        return json.loads(resp.choices[0].message.content or "{}")
+        result = json.loads(resp.choices[0].message.content or "{}")
+
+        # DEBUG: Log LLM response for DS agent calls
+        if is_ds_call:
+            st.write("🔍 **DEBUG - DS Agent LLM Response:**")
+            st.write(f"- Response length: {len(resp.choices[0].message.content or '')} chars")
+            st.write(f"- Raw response: {resp.choices[0].message.content[:500]}...")
+
+            # Check the structure of the response
+            if 'sequence' in result:
+                st.write("- Response uses 'sequence' format")
+                for i, step in enumerate(result.get('sequence', [])):
+                    sql_val = step.get('duckdb_sql')
+                    st.write(f"  Step {i}: action={step.get('action')}, sql={'NULL' if sql_val is None else ('EMPTY' if sql_val == '' else 'HAS_VALUE')}")
+            elif 'action_sequence' in result:
+                st.write("- Response uses 'action_sequence' format")
+            else:
+                st.write("- Response has no sequence")
+
+        return result
     except Exception as e1:
         # Fallback: free-form then parse
         try:
@@ -3900,7 +3947,33 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
         "shared_context": shared_context,
         "column_hints": column_hints,
     }
+
+    # DEBUG: Log what we're sending to DS agent
+    st.write("🔍 **DEBUG - DS Agent Input:**")
+    st.write(f"- AM Plan: {am_json.get('plan_for_ds', 'MISSING')}")
+    st.write(f"- AM Next Action: {am_json.get('next_action_type', 'MISSING')}")
+    st.write(f"- AM Action Sequence: {am_json.get('action_sequence', 'MISSING')}")
+    st.write(f"- Current Question: {current_question}")
+    st.write(f"- Has Shared Context: {bool(shared_context)}")
+    st.write(f"- Has Column Hints: {bool(column_hints)}")
+
+    if shared_context.get("referenced_entities"):
+        st.write(f"- Referenced Entities: {shared_context['referenced_entities']}")
+
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
+
+    # DEBUG: Log what DS agent returned
+    st.write("🔍 **DEBUG - DS Agent Output:**")
+    st.write(f"- DS Action: {ds_json.get('action', 'MISSING')}")
+    st.write(f"- DS Action Sequence: {ds_json.get('action_sequence', 'MISSING')}")
+    st.write(f"- DS Sequence: {ds_json.get('sequence', 'MISSING')}")
+    st.write(f"- DS Summary: {ds_json.get('ds_summary', 'MISSING')}")
+
+    if ds_json.get("sequence"):
+        st.write("🔍 **DEBUG - Sequence Steps:**")
+        for i, step in enumerate(ds_json.get("sequence", [])):
+            st.write(f"  Step {i}: Action={step.get('action')}, SQL={step.get('duckdb_sql')}")
+
     st.session_state.last_ds_json = ds_json
 
     # CRITICAL FIX: Generate SQL queries if missing (addresses NULL duckdb_sql bug)
