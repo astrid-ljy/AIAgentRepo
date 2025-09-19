@@ -295,19 +295,38 @@ When using data_preparation action, the system will:
 - Explain: Read cached results and interpret without recomputing
 - Entity continuity: "this product" MUST use product_id from shared_context.key_findings
 - Keyword Extraction: For review analysis, use multi-step approach: 1) SQL to get reviews, 2) keyword_extraction action to process text
+- ALWAYS preserve referenced_entities from AM plan (use am_plan.referenced_entities if available)
+
+**CRITICAL: When using action_sequence, format MUST be:**
+```json
+{
+  "action_sequence": [
+    {
+      "action": "sql",
+      "duckdb_sql": "SELECT actual_sql_query_here",
+      "description": "Step description"
+    },
+    {
+      "action": "sql",
+      "duckdb_sql": "SELECT another_query",
+      "description": "Next step description"
+    }
+  ]
+}
+```
 
 Return JSON fields:
 - ds_summary
 - need_more_info
-- clarifying_questions  
-- action OR action_sequence
-- duckdb_sql (NEVER null - always provide actual SQL)
+- clarifying_questions
+- action OR action_sequence (as array of objects with action, duckdb_sql, description)
+- duckdb_sql (only for single action - NEVER null)
 - charts
 - model_plan: {task, target, features, model_family, n_clusters}
 - calc_description
 - assumptions
 - uses_cached_result: true/false
-- referenced_entities: {product_id: "...", customer_id: "..."}
+- referenced_entities: {product_id: "...", customer_id: "..."} (ALWAYS include from shared_context)
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
@@ -1008,6 +1027,7 @@ def llm_json(system_prompt: str, user_payload: str) -> dict:
             st.write(f"- AM Action Sequence in payload: {payload_data.get('am_action_sequence', 'MISSING')}")
             st.write(f"- AM Next Action in payload: {payload_data.get('am_next_action_type', 'MISSING')}")
             st.write(f"- AM Plan in payload: {payload_data.get('am_plan', 'MISSING')}")
+            st.write(f"- AM Referenced Entities in payload: {payload_data.get('am_referenced_entities', 'MISSING')}")
 
             # Check if data schema is included
             shared_ctx = payload_data.get('shared_context', {})
@@ -3944,6 +3964,7 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
         "am_plan": am_json.get("plan_for_ds", ""),
         "am_next_action_type": am_json.get("next_action_type", "eda"),
         "am_action_sequence": am_json.get("action_sequence", []),
+        "am_referenced_entities": am_json.get("referenced_entities", {}),
         "shared_context": shared_context,
         "column_hints": column_hints,
     }
@@ -3953,12 +3974,13 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
     st.write(f"- AM Plan: {am_json.get('plan_for_ds', 'MISSING')}")
     st.write(f"- AM Next Action: {am_json.get('next_action_type', 'MISSING')}")
     st.write(f"- AM Action Sequence: {am_json.get('action_sequence', 'MISSING')}")
+    st.write(f"- AM Referenced Entities: {am_json.get('referenced_entities', 'MISSING')}")
     st.write(f"- Current Question: {current_question}")
     st.write(f"- Has Shared Context: {bool(shared_context)}")
     st.write(f"- Has Column Hints: {bool(column_hints)}")
 
     if shared_context.get("referenced_entities"):
-        st.write(f"- Referenced Entities: {shared_context['referenced_entities']}")
+        st.write(f"- Shared Context Referenced Entities: {shared_context['referenced_entities']}")
 
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
 
