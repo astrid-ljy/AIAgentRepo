@@ -76,8 +76,7 @@ test_modules.py
 simple_test.py
 debug_error.py
 
-# Miscellaneous
-atomic_chat.py
+# Miscellaneous (atomic_chat.py moved to src/ - now required)
 system_ds_improved.py
 system_ds_new.txt
 system_ds_streamlined.txt
