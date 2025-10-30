@@ -1,0 +1,111 @@
+# Secrets and sensitive data
+.streamlit/secrets.toml
+.streamlit/conversation_history.json
+*.env
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Runtime artifacts
+artifacts/
+*.db
+*.duckdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large data files (uncomment if you don't want to upload datasets)
+# *.csv
+# *.xlsx
+Telco_customer_churn.csv
+Telco_customer_churn.xlsx
+
+# Backup and old version files
+*_backup.py
+*_old.py
+*.bak
+app_2.py
+app_3.py
+app_after.py
+app_complete.py
+app_fixed.py
+app_temp.py
+app2.py
+app2_patched.py
+app4.py
+appba.py
+appba2.py
+appba3.py
+0923023.py
+0923023(1).py
+09231825.py
+09251458.py
+10031334.py
+10081810.py
+10091806.py
+10161531.py
+10240214.py
+10240253.py
+
+# Test and debug files
+test.py
+test_app.py
+test_debug.py
+test_fix.py
+test_imports.py
+test_judge_agent.py
+test_modules.py
+simple_test.py
+debug_error.py
+
+# Miscellaneous
+atomic_chat.py
+system_ds_improved.py
+system_ds_new.txt
+system_ds_streamlined.txt
+replace_ds.ps1
+replace_system_ds.ps1
+nul
+
+# Legacy modules (if using monolithic app.py)
+advanced_sql.py
+agent_system_prompt.txt
+agent_tools.py
+agents.py
+core.py
+data_operations.py
+database.py
+eda_utils.py
+entity_context.py
+joint.py
+joint2.py
+joint3.py
+main.py
+nlp_analysis.py
+sql_generation.py
+streamlit_telco_agent.py
+ui.py
+
+# Old documentation
+AIAgent/
+
+# Log files
+*.log
