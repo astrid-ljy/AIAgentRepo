@@ -5407,8 +5407,15 @@ with st.sidebar:
         help="Supports: ZIP (containing CSVs), CSV, Excel (.xlsx/.xls), JSON, JSONL, TSV, TXT, and Parquet files"
     )
     st.header("🧠 Model")
-    model   = st.text_input("OpenAI model", value=DEFAULT_MODEL)
-    api_key = st.text_input("OPENAI_API_KEY", value=OPENAI_API_KEY, type="password")
+    # Use model and API key from secrets/environment variables only (not exposed in UI)
+    model   = DEFAULT_MODEL
+    api_key = OPENAI_API_KEY
+
+    # Show current model as read-only info
+    st.info(f"**Current Model:** {model}")
+
+    if not api_key:
+        st.error("⚠️ **OpenAI API Key not configured!**\n\nPlease add your API key to `.streamlit/secrets.toml` or set the `OPENAI_API_KEY` environment variable.")
     
     # Conversation Management Controls
     st.markdown("**💬 Conversation Controls**")

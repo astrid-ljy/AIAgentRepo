@@ -82,13 +82,35 @@ tiktoken
 
 ## ⚙️ Configuration
 
+### **API Key Setup (Required)**
+
+The OpenAI API key is configured via Streamlit secrets or environment variables - **not exposed in the UI for security**.
+
+**Option 1: Streamlit Secrets** (Recommended for local development)
+
 Create `.streamlit/secrets.toml`:
 
 ```toml
-[openai]
-api_key = "your-openai-api-key"
-model = "gpt-4o"
+OPENAI_API_KEY = "sk-your-openai-api-key-here"
+OPENAI_MODEL = "gpt-4o-mini"
 ```
+
+**Option 2: Environment Variables** (For deployment)
+
+```bash
+export OPENAI_API_KEY="sk-your-openai-api-key-here"
+export OPENAI_MODEL="gpt-4o-mini"
+```
+
+**Option 3: Streamlit Cloud**
+
+In your Streamlit Cloud dashboard:
+- Go to Settings → Secrets
+- Add:
+  ```toml
+  OPENAI_API_KEY = "sk-your-openai-api-key-here"
+  OPENAI_MODEL = "gpt-4o-mini"
+  ```
 
 ## 🎓 Usage Examples
 
