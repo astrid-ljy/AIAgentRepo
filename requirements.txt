@@ -7,3 +7,6 @@ seaborn
 scikit-learn
 openai
 tiktoken
+sqlglot
+pydantic
+opentelemetry-api

@@ -3,6 +3,10 @@ duckdb
 pandas
 numpy
 matplotlib
+seaborn
 scikit-learn
 openai
 tiktoken
+sqlglot
+pydantic
+opentelemetry-api
