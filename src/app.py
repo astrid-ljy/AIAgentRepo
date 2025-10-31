@@ -1776,21 +1776,77 @@ You are the Data Scientist (DS) proposing an APPROACH in plain language.
 }
 ```
 
+**🚨 CLUSTERING/SEGMENTATION requires 4 PHASES:**
+
+**User requests:** "customer segmentation", "clustering", "cluster analysis", "segment customers", "k-means", "unsupervised learning", "group customers"
+**This is UNSUPERVISED learning - NO target variable!**
+
+**Proper Clustering Workflow (4 Phases):**
+
+**Phase 1: Data Retrieval & Cleaning**
+- SQL: `SELECT * FROM table` (RAW data, NO aggregation, ALL rows needed!)
+- Python: Data cleaning (missing values, outliers, deduplication)
+- Store cleaned dataset in st.session_state.cleaned_dataset
+
+**Phase 2: Feature Engineering (NO target variable!)**
+- Use cleaned dataset from session state (NO new SQL!)
+- Exclude ID columns (CUST_ID, customer_id, etc.)
+- Select numeric features for clustering
+- Normalize/scale features (StandardScaler)
+- Python only: feature selection, encoding
+
+**Phase 3: Clustering**
+- Use prepared features from Phase 2 (NO new SQL!)
+- Apply clustering algorithm: KMeans, DBSCAN, or Hierarchical
+- Determine optimal k using elbow method or silhouette analysis
+- Assign cluster labels to each customer
+- Python only: sklearn.cluster.KMeans
+
+**Phase 4: Cluster Analysis & Visualization**
+- Profile each cluster (mean values, characteristics)
+- Calculate silhouette scores for quality assessment
+- Visualize clusters using PCA or t-SNE scatter plots
+- Create cluster comparison charts
+- Provide business recommendations for each segment
+- Python only: matplotlib/seaborn visualizations
+
+**When you identify Clustering/Segmentation, your approach MUST state:**
+```json
+{
+  "workflow_type": "multi_phase",
+  "approach_summary": "I'll perform customer segmentation in 4 phases: retrieve and clean ALL customer data, engineer features (NO target variable), apply KMeans clustering to identify segments, and visualize clusters with business recommendations",
+  "key_steps": [
+    "Phase 1: Retrieve ALL raw data using SELECT * FROM table (NO filtering, ALL customers needed for clustering) and perform data cleaning",
+    "Phase 2: Feature engineering - select numeric features, exclude ID columns, normalize/scale features (NO target variable for unsupervised learning)",
+    "Phase 3: Apply KMeans clustering with elbow method to find optimal k, assign cluster labels to each customer",
+    "Phase 4: Profile each cluster, calculate silhouette scores, create PCA/t-SNE visualizations, provide segment-specific recommendations"
+  ],
+  "phases": [
+    {"phase": "data_retrieval_and_cleaning", "description": "Retrieve ALL raw data using SELECT * FROM table (NO aggregation). Perform data cleaning: missing values, outliers, deduplication."},
+    {"phase": "feature_engineering", "description": "Select numeric features, exclude ID columns, normalize features. NO target variable for unsupervised learning. Python only, NO SQL."},
+    {"phase": "clustering", "description": "Apply KMeans/DBSCAN, determine optimal k using elbow method, assign cluster labels. Python only, NO SQL."},
+    {"phase": "cluster_analysis", "description": "Profile clusters, calculate silhouette scores, visualize with PCA/t-SNE scatter plots, provide business recommendations. Python only, NO SQL."}
+  ],
+  "estimated_complexity": "complex - requires multi-phase execution"
+}
+```
+
 **🚨 DATA CLEANING IS UNIVERSAL:**
 - Data cleaning should apply to ALL data-related tasks, not just EDA
 - Always retrieve raw data first, clean it, then analyze
 - Never work with aggregated data when you need to detect outliers or missing values
 
 **Think through:**
-1. **Is this EDA/multi-phase?** If yes, plan ALL phases upfront
-2. **Check key_findings FIRST**: If user says "the app", "that product", "this game" - check for entity IDs:
+1. **Is this clustering/segmentation?** If yes, plan 4 phases (data, features, clustering, visualization)
+2. **Is this EDA/multi-phase?** If yes, plan 3 phases (data, statistics, visualization)
+3. **Check key_findings FIRST**: If user says "the app", "that product", "this game" - check for entity IDs:
    - `identified_app_id`, `latest_app_id`, `target_app_id`
    - `identified_product_id`, `top_selling_product_id`, `target_product_id`
    - `identified_game_id`, `latest_game_id`, `target_game_id`
-3. What data sources do I need?
-4. What are the key steps to get the answer?
-5. Are there any data quality concerns?
-6. Do I need clarification on anything?
+4. What data sources do I need?
+5. What are the key steps to get the answer?
+6. Are there any data quality concerns?
+7. Do I need clarification on anything?
 
 **Handling Contextual References:**
 - User says "more info about the specified app" → Check `key_findings` for app_id
