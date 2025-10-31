@@ -225,7 +225,11 @@ class ChatChain:
                 ml_keywords = [
                     "predictive model", "predict", "train model", "build model",
                     "machine learning", "classification", "regression", "forecast",
-                    "train a model", "build a model", "prediction model"
+                    "train a model", "build a model", "prediction model",
+                    # Unsupervised learning keywords
+                    "clustering", "cluster", "segmentation", "segment", "unsupervised",
+                    "customer segmentation", "customer segment", "group customers",
+                    "k-means", "kmeans", "dbscan", "hierarchical clustering"
                 ]
                 question_lower = user_question.lower()
                 approach_text = str(approach.get("approach_summary", "")) + " " + str(approach.get("key_steps", []))
@@ -236,14 +240,42 @@ class ChatChain:
                 is_eda = any(kw in question_lower for kw in eda_keywords)
                 mentions_phases = "phase 1" in approach_lower and "phase 2" in approach_lower and "phase 3" in approach_lower
 
+                # Detect clustering/segmentation specifically
+                clustering_keywords = ["clustering", "cluster", "segmentation", "segment", "unsupervised", "k-means", "kmeans", "dbscan"]
+                is_clustering = any(kw in question_lower for kw in clustering_keywords)
+
                 if is_ml or is_eda or mentions_phases:
                     # Inject multi-phase workflow structure
                     approach["workflow_type"] = "multi_phase"
 
                     # Try to extract phases from key_steps if they mention phases
                     if not approach.get("phases"):
-                        if is_ml:
-                            # ML phases - Full machine learning pipeline
+                        if is_clustering:
+                            # Clustering/Segmentation phases - Unsupervised learning workflow
+                            # Phase 1: Retrieve ALL raw data (no target variable for unsupervised!)
+                            # Phases 2-4: Feature preparation, clustering, interpretation
+                            approach["phases"] = [
+                                {
+                                    "phase": "data_retrieval_and_cleaning",
+                                    "description": "Retrieve ALL raw data using SELECT * FROM table (NO LIMIT, NO GROUP BY, NO aggregation). ALL columns and ALL rows needed for clustering. Perform data cleaning: type validation, missing values, deduplication. Store cleaned dataset."
+                                },
+                                {
+                                    "phase": "feature_engineering",
+                                    "description": "Analyze features for clustering, handle categorical encoding (one-hot/label encoding), normalize/scale numerical features, select relevant features. Python only, NO SQL."
+                                },
+                                {
+                                    "phase": "clustering",
+                                    "description": "Apply clustering algorithm (KMeans, DBSCAN, or hierarchical), determine optimal number of clusters (elbow method, silhouette), assign cluster labels. Python only, NO SQL."
+                                },
+                                {
+                                    "phase": "cluster_analysis",
+                                    "description": "Profile each cluster (describe characteristics), calculate silhouette scores, visualize clusters (PCA/t-SNE), provide business recommendations for each segment. Python only, NO SQL."
+                                }
+                            ]
+                            import streamlit as st
+                            st.info(f"🔍 Auto-detected Clustering workflow: {len(approach['phases'])} phases planned")
+                        elif is_ml:
+                            # Supervised ML phases - Classification/Regression pipeline
                             # Phase 1: Retrieve ALL raw data (need both positive and negative examples!)
                             # Phases 2-4: Feature engineering, training, evaluation
                             approach["phases"] = [
