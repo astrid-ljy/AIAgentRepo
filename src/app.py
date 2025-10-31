@@ -14241,6 +14241,322 @@ st.success("✅ Model evaluation complete!")
 - ✅ ONLY use: results and metadata from st.session_state
 - ✅ Check is_classification to choose appropriate metrics
 - ✅ Use matplotlib/seaborn for visualizations
+- DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'""",
+                                        "clustering": """**Phase 3: Clustering (Unsupervised Learning)**
+
+🚨 CRITICAL: Use normalized features from Phase 2. NO target variable!
+
+**MANDATORY CODE TEMPLATE** (follow this EXACTLY):
+
+```python
+import pandas as pd
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Load metadata from Phase 2
+ml_metadata = st.session_state.ml_metadata
+df = st.session_state.cleaned_dataset
+
+# Get features (already normalized in Phase 2)
+feature_cols = ml_metadata['feature_cols']
+X = df[feature_cols].values
+
+# Determine optimal number of clusters using Elbow Method
+st.write("### Determining Optimal Number of Clusters")
+
+wcss = []  # Within-cluster sum of squares
+silhouette_scores = []
+k_range = range(2, 11)
+
+for k in k_range:
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    kmeans.fit(X)
+    wcss.append(kmeans.inertia_)
+    silhouette_scores.append(silhouette_score(X, kmeans.labels_))
+
+# Plot Elbow Curve
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+ax1.plot(k_range, wcss, 'bo-')
+ax1.set_xlabel('Number of Clusters (k)')
+ax1.set_ylabel('Within-Cluster Sum of Squares (WCSS)')
+ax1.set_title('Elbow Method For Optimal k')
+ax1.grid(True)
+
+ax2.plot(k_range, silhouette_scores, 'ro-')
+ax2.set_xlabel('Number of Clusters (k)')
+ax2.set_ylabel('Silhouette Score')
+ax2.set_title('Silhouette Analysis For Optimal k')
+ax2.grid(True)
+
+st.pyplot(fig)
+
+# Choose optimal k (can be automated or use k=3 as default)
+optimal_k = 3
+if len(silhouette_scores) > 0:
+    optimal_k = k_range[np.argmax(silhouette_scores)]
+
+st.write(f"**Optimal number of clusters: {optimal_k}**")
+st.write(f"**Silhouette Score: {max(silhouette_scores):.3f}**")
+
+# Apply KMeans with optimal k
+kmeans_final = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
+df['Cluster'] = kmeans_final.fit_predict(X)
+
+# Store results for Phase 4
+st.session_state.clustering_results = {
+    'model': kmeans_final,
+    'labels': df['Cluster'].values,
+    'n_clusters': optimal_k,
+    'silhouette_score': silhouette_score(X, df['Cluster']),
+    'feature_cols': feature_cols,
+    'cluster_centers': kmeans_final.cluster_centers_
+}
+
+st.write(f"### Cluster Distribution")
+st.write(df['Cluster'].value_counts().sort_index())
+
+st.success("✅ Clustering complete!")
+```
+
+**ABSOLUTE RULES:**
+- ❌ NO target variable for clustering
+- ✅ Use feature_cols from ml_metadata
+- ✅ Show elbow curve and silhouette scores
+- ✅ Store clustering_results in session state for Phase 4
+- DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'""",
+                                        "cluster_analysis": """**Phase 4: Cluster Analysis & Business Recommendations**
+
+🚨 CRITICAL: Provide DETAILED, PLAIN-LANGUAGE analysis for each cluster with actionable business insights.
+
+**MANDATORY CODE TEMPLATE** (follow this EXACTLY):
+
+```python
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.decomposition import PCA
+
+# Load data and clustering results
+df = st.session_state.cleaned_dataset
+clustering_results = st.session_state.clustering_results
+ml_metadata = st.session_state.ml_metadata
+
+n_clusters = clustering_results['n_clusters']
+feature_cols = clustering_results['feature_cols']
+
+st.write("# 📊 Customer Segmentation Analysis")
+st.write(f"**Number of Segments Identified:** {n_clusters}")
+st.write(f"**Overall Silhouette Score:** {clustering_results['silhouette_score']:.3f}")
+
+# === DETAILED CLUSTER PROFILING ===
+st.write("## 🎯 Detailed Segment Profiles")
+
+for cluster_id in range(n_clusters):
+    cluster_df = df[df['Cluster'] == cluster_id]
+    cluster_size = len(cluster_df)
+    cluster_pct = (cluster_size / len(df)) * 100
+
+    st.write(f"### Segment {cluster_id + 1} ({cluster_size} customers, {cluster_pct:.1f}% of total)")
+
+    # Calculate cluster statistics
+    cluster_stats = cluster_df[feature_cols].describe().loc[['mean', 'std', '50%']]
+    overall_stats = df[feature_cols].mean()
+
+    st.write("#### 📈 Key Financial Characteristics:")
+
+    # Identify defining characteristics (features significantly different from average)
+    defining_features = []
+    for col in feature_cols:
+        cluster_mean = cluster_stats.loc['mean', col]
+        overall_mean = overall_stats[col]
+        diff_pct = ((cluster_mean - overall_mean) / (overall_mean + 1e-6)) * 100
+
+        if abs(diff_pct) > 20:  # More than 20% different from average
+            direction = "higher" if diff_pct > 0 else "lower"
+            defining_features.append({
+                'feature': col,
+                'cluster_value': cluster_mean,
+                'overall_value': overall_mean,
+                'difference_pct': diff_pct,
+                'direction': direction
+            })
+
+    # Sort by absolute difference
+    defining_features.sort(key=lambda x: abs(x['difference_pct']), reverse=True)
+
+    # Display top defining features in plain language
+    for feat in defining_features[:5]:
+        feat_name = feat['feature'].replace('_', ' ').title()
+        if feat['difference_pct'] > 0:
+            st.write(f"- **{feat_name}**: ${feat['cluster_value']:.2f} (📈 {feat['difference_pct']:.0f}% above average)")
+        else:
+            st.write(f"- **{feat_name}**: ${feat['cluster_value']:.2f} (📉 {abs(feat['difference_pct']):.0f}% below average)")
+
+    st.write("")
+    st.write("#### 💡 Customer Behavior Pattern:")
+
+    # Generate plain-language description based on key features
+    # This is where we provide DETAILED analysis
+
+    # Analyze spending behavior
+    purchases_col = [c for c in feature_cols if 'PURCHASE' in c.upper()]
+    if purchases_col:
+        avg_purchases = cluster_df[purchases_col[0]].mean()
+        if avg_purchases > df[purchases_col[0]].quantile(0.75):
+            st.write("- 🛍️ **High-spending customers** who make frequent and substantial purchases")
+        elif avg_purchases > df[purchases_col[0]].quantile(0.25):
+            st.write("- 🛍️ **Moderate spenders** with average purchase patterns")
+        else:
+            st.write("- 🛍️ **Conservative spenders** with minimal purchase activity")
+
+    # Analyze balance behavior
+    balance_col = [c for c in feature_cols if 'BALANCE' in c.upper()]
+    if balance_col:
+        avg_balance = cluster_df[balance_col[0]].mean()
+        if avg_balance > df[balance_col[0]].quantile(0.75):
+            st.write("- 💰 **High account balances**, indicating strong financial capacity")
+        elif avg_balance > df[balance_col[0]].quantile(0.25):
+            st.write("- 💰 **Moderate account balances**, typical for everyday banking")
+        else:
+            st.write("- 💰 **Low account balances**, may indicate financial constraints or transactional accounts")
+
+    # Analyze credit behavior
+    credit_col = [c for c in feature_cols if 'CREDIT' in c.upper()]
+    if credit_col:
+        avg_credit = cluster_df[credit_col[0]].mean()
+        if avg_credit > df[credit_col[0]].quantile(0.75):
+            st.write("- 💳 **High credit limits**, showing strong creditworthiness")
+        elif avg_credit > df[credit_col[0]].quantile(0.25):
+            st.write("- 💳 **Standard credit limits**, typical for regular customers")
+        else:
+            st.write("- 💳 **Limited credit access**, may indicate newer customers or credit concerns")
+
+    # Analyze payment behavior
+    payment_col = [c for c in feature_cols if 'PAYMENT' in c.upper()]
+    if payment_col:
+        avg_payment = cluster_df[payment_col[0]].mean()
+        payment_ratio = avg_payment / (avg_balance + 1)
+        if payment_ratio > 0.5:
+            st.write("- 💸 **Active bill payers**, regularly settling balances")
+        else:
+            st.write("- 💸 **Carries balances**, may benefit from debt management products")
+
+    # Cash advance behavior
+    cash_advance_col = [c for c in feature_cols if 'CASH' in c.upper() and 'ADVANCE' in c.upper()]
+    if cash_advance_col:
+        avg_cash_advance = cluster_df[cash_advance_col[0]].mean()
+        if avg_cash_advance > df[cash_advance_col[0]].quantile(0.75):
+            st.write("- 🏧 **Frequent cash advance users**, indicating potential liquidity needs")
+        elif avg_cash_advance > 0:
+            st.write("- 🏧 **Occasional cash advance users**")
+        else:
+            st.write("- 🏧 **Rarely uses cash advances**, prefers other transaction methods")
+
+    st.write("")
+    st.write("#### 🎯 Recommended Products & Strategies:")
+
+    # Generate specific recommendations based on profile
+    recommendations = []
+
+    # Determine customer value tier
+    total_value = 0
+    if balance_col:
+        total_value += cluster_df[balance_col[0]].mean()
+    if purchases_col:
+        total_value += cluster_df[purchases_col[0]].mean()
+
+    value_percentile = (total_value / (df[balance_col[0]].mean() + df[purchases_col[0]].mean())) * 100
+
+    if value_percentile > 150:  # High-value segment
+        st.write("**💎 Premium/High-Value Customer Segment**")
+        st.write("- **Wealth Management Services**: Private banking, investment advisory, portfolio management")
+        st.write("- **Premium Credit Products**: High-limit credit cards with rewards, platinum/signature cards")
+        st.write("- **Exclusive Benefits**: Concierge services, lounge access, preferential rates")
+        st.write("- **Investment Products**: Mutual funds, structured products, retirement planning")
+        st.write("- **Relationship Strategy**: Assign dedicated relationship manager, quarterly portfolio reviews")
+
+    elif value_percentile > 80:  # Medium-value segment
+        st.write("**🌟 Growing Customer Segment**")
+        st.write("- **Growth-Oriented Products**: Personal loans for major purchases, home equity lines")
+        st.write("- **Credit Card Upgrades**: Offer cashback or travel rewards cards")
+        st.write("- **Savings Incentives**: High-yield savings accounts, automated savings plans")
+        st.write("- **Financial Education**: Webinars on investing, retirement planning workshops")
+        st.write("- **Relationship Strategy**: Regular digital engagement, targeted offers every 2-3 months")
+
+    else:  # Mass-market segment
+        st.write("**🎯 Mass Market Customer Segment**")
+        st.write("- **Basic Banking Products**: Low-fee checking accounts, basic savings accounts")
+        st.write("- **Starter Credit Products**: Secured credit cards, low-limit cards to build credit")
+        st.write("- **Debt Management**: Balance transfer offers, debt consolidation loans")
+        st.write("- **Financial Wellness**: Budgeting tools, emergency savings programs")
+        st.write("- **Relationship Strategy**: Digital-first approach, automated nudges and alerts")
+
+    # Specific product recommendations based on behavior
+    st.write("")
+    st.write("**Specific Product Opportunities:**")
+
+    if cash_advance_col and cluster_df[cash_advance_col[0]].mean() > df[cash_advance_col[0]].quantile(0.60):
+        st.write("- 🔴 **Personal Line of Credit**: Replace high-cost cash advances with lower-rate credit line")
+
+    if balance_col and cluster_df[balance_col[0]].mean() > df[balance_col[0]].quantile(0.70):
+        st.write("- 💼 **Investment Accounts**: Convert idle balances into wealth-building investments")
+
+    if purchases_col and cluster_df[purchases_col[0]].mean() > df[purchases_col[0]].quantile(0.70):
+        st.write("- 🎁 **Rewards Credit Card**: Maximize value from high purchase volumes")
+
+    # Risk assessment
+    st.write("")
+    st.write("#### ⚠️ Risk Profile & Retention Strategy:")
+
+    if payment_col and cluster_df[payment_col[0]].mean() < df[payment_col[0]].quantile(0.30):
+        st.write("- 🔴 **Credit Risk**: Below-average payment activity - consider credit monitoring")
+        st.write("- **Retention Action**: Proactive outreach, financial hardship programs")
+    else:
+        st.write("- 🟢 **Low Credit Risk**: Healthy payment patterns indicate good financial management")
+        st.write("- **Retention Action**: Reward loyalty with rate discounts, exclusive offers")
+
+    st.write("---")
+
+# === VISUALIZATION: PCA Scatter Plot ===
+st.write("## 📊 Cluster Visualization")
+
+X = df[feature_cols].values
+
+# Apply PCA for 2D visualization
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X)
+
+# Create scatter plot
+fig, ax = plt.subplots(figsize=(12, 8))
+scatter = ax.scatter(X_pca[:, 0], X_pca[:, 1], c=df['Cluster'], cmap='viridis', alpha=0.6, s=50)
+ax.set_xlabel(f'First Principal Component ({pca.explained_variance_ratio_[0]*100:.1f}% variance)')
+ax.set_ylabel(f'Second Principal Component ({pca.explained_variance_ratio_[1]*100:.1f}% variance)')
+ax.set_title('Customer Segments - PCA Visualization')
+plt.colorbar(scatter, label='Cluster')
+st.pyplot(fig)
+
+# === CLUSTER COMPARISON TABLE ===
+st.write("## 📋 Cluster Comparison Table")
+
+comparison = df.groupby('Cluster')[feature_cols].mean().round(2)
+comparison['Customer_Count'] = df.groupby('Cluster').size()
+st.dataframe(comparison)
+
+st.success("✅ Detailed cluster analysis complete!")
+```
+
+**ABSOLUTE RULES:**
+- ✅ Provide DETAILED plain-language descriptions for each cluster
+- ✅ Include specific financial characteristics with comparisons
+- ✅ Generate actionable product recommendations
+- ✅ Assess risk and provide retention strategies
+- ✅ Create clear PCA visualization
+- ✅ Use business terminology, not technical jargon
 - DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'"""
                                     }
 
