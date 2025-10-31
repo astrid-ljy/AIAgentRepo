@@ -411,20 +411,21 @@ class ChatChain:
             self.memory.put_artifact(run_id, "validation", validation, agent="validator")
 
             if not validation.get("ok", False):
-                # Show validation errors
+                # Show validation errors (informational - Judge will decide whether to revise or block)
                 errors = validation.get("errors", ["Unknown validation error"])
                 error_msg = "\n".join([f"• {err}" for err in errors])
-                self._display_agent_message("Validator", f"Schema validation failed:\n{error_msg}")
+                self._display_agent_message("Validator", f"⚠️ Schema validation issues detected:\n{error_msg}")
                 self.render_chat_fn()
 
-                # Check for schema drift
+                # Check for schema drift (actual schema changes in database)
                 if self._detect_schema_drift():
                     self.add_msg_fn("system", "⚠️ Schema drift detected, refreshing catalog...")
                     self._refresh_catalog()
                     self.render_chat_fn()
                     return self.execute(user_question, depth=depth + 1)
 
-                raise SchemaError(f"Schema validation failed: {errors}")
+                # Don't raise error here - let Judge review and decide whether to revise or block
+                # Judge will see validation errors and can ask DS to fix table names, column names, etc.
 
             # Create Judge agent to review SQL against approved approach
             judge_agent = Agent(
