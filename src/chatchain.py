@@ -10,7 +10,6 @@ import json
 from typing import Dict, Any, Optional, Callable, List
 from agent_contracts import DSProposal, AMCritique, JudgeVerdict, ConsensusArtifact
 from agent_memory import Memory, QuestionCache
-from sql_validator import Validator
 from atomic_chat import AtomicChat, Budget, Agent
 
 
@@ -57,7 +56,6 @@ class ChatChain:
 
         # Build catalog from available tables
         self.catalog = self._build_catalog()
-        self.validator = Validator(catalog=self.catalog, dialect="duckdb")
 
         self.budget_per_run = {"tokens": 50000, "ms": 30000}
         self.max_rollback_depth = 2
@@ -81,7 +79,6 @@ class ChatChain:
         """Refresh catalog and bump version"""
         old_version = self.memory.get_catalog_version()
         self.catalog = self._build_catalog()
-        self.validator.catalog = self.catalog
         self.memory.bump_catalog_version()
 
         # Invalidate question cache for old version
@@ -340,20 +337,42 @@ class ChatChain:
             else:
                 raise ValueError(f"Proposal does not contain SQL. Type: {type(proposal)}")
 
-            # Schema validation
-            validation = self.validator.analyze_sql(sql)
+            # Validator Agent - check SQL syntax and schema
+            validator_prompt = self.system_prompts.get("VALIDATOR", "")
+            if not validator_prompt:
+                raise ValueError("VALIDATOR system prompt not found in system_prompts")
 
-            # Convert non-serializable objects before storing
-            validation_serializable = {
-                **validation,
-                "lineage": validation["lineage"].to_dict() if validation.get("lineage") else None
+            validator_payload = {
+                "sql": sql,
+                "schema_info": self.catalog,
+                "dialect": "duckdb"
             }
-            self.memory.put_artifact(run_id, "validation", validation_serializable, agent="validator")
 
-            if not validation["ok"]:
+            # Call Validator Agent
+            validation_response = self.llm_function(validator_prompt, validator_payload)
+
+            # Parse response (handle both dict and JSON string)
+            if isinstance(validation_response, str):
+                try:
+                    validation = json.loads(validation_response)
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, assume validation failed
+                    validation = {
+                        "ok": False,
+                        "errors": ["Failed to parse validation response"],
+                        "reasoning": validation_response[:200]
+                    }
+            else:
+                validation = validation_response
+
+            # Store validation results
+            self.memory.put_artifact(run_id, "validation", validation, agent="validator")
+
+            if not validation.get("ok", False):
                 # Show validation errors
-                error_msg = "\n".join([f"• {err}" for err in validation["errors"]])
-                self._display_agent_message("Judge", f"Schema validation failed:\n{error_msg}")
+                errors = validation.get("errors", ["Unknown validation error"])
+                error_msg = "\n".join([f"• {err}" for err in errors])
+                self._display_agent_message("Validator", f"Schema validation failed:\n{error_msg}")
                 self.render_chat_fn()
 
                 # Check for schema drift
@@ -363,7 +382,7 @@ class ChatChain:
                     self.render_chat_fn()
                     return self.execute(user_question, depth=depth + 1)
 
-                raise SchemaError(f"Schema validation failed: {validation['errors']}")
+                raise SchemaError(f"Schema validation failed: {errors}")
 
             # Create Judge agent to review SQL against approved approach
             judge_agent = Agent(
@@ -386,12 +405,34 @@ class ChatChain:
             current_sql = sql
 
             for review_turn in range(3):
-                # Validate schema for current SQL
-                validation = self.validator.analyze_sql(current_sql)
+                # Validator Agent - check SQL syntax and schema for current SQL
+                validator_prompt = self.system_prompts.get("VALIDATOR", "")
+                validator_payload = {
+                    "sql": current_sql,
+                    "schema_info": self.catalog,
+                    "dialect": "duckdb"
+                }
+
+                # Call Validator Agent
+                validation_response = self.llm_function(validator_prompt, validator_payload)
+
+                # Parse response (handle both dict and JSON string)
+                if isinstance(validation_response, str):
+                    try:
+                        validation = json.loads(validation_response)
+                    except json.JSONDecodeError:
+                        validation = {
+                            "ok": False,
+                            "errors": ["Failed to parse validation response"],
+                            "reasoning": validation_response[:200]
+                        }
+                else:
+                    validation = validation_response
 
                 # Display validation results (but don't block - let Judge decide)
-                if not validation["ok"]:
-                    error_msg = "\n".join([f"• {err}" for err in validation["errors"]])
+                if not validation.get("ok", False):
+                    errors = validation.get("errors", ["Unknown validation error"])
+                    error_msg = "\n".join([f"• {err}" for err in errors])
                     self._display_agent_message("Validator", f"⚠️ Schema validation issues:\n{error_msg}")
                     self.render_chat_fn()
 
