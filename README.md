@@ -171,14 +171,11 @@ See `docs/` folder for detailed documentation:
 
 This is a research/development project for advanced AI agent systems with multi-phase workflow orchestration.
 
-## 📝 License
-
-[Add your license here]
 
 ## 👤 Author
 
-Astrid Liu - [astrid-ljy](https://github.com/astrid-ljy)
+Astrid Li - [astrid-ljy](https://github.com/astrid-ljy)
 
 ---
 
-**Last Updated**: October 2024
+**Last Updated**: October 2025
