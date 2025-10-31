@@ -346,6 +346,16 @@ class ChatChain:
                 question=user_question
             )
 
+            # DEBUG: Check for API errors
+            if "_error" in proposal or "_fallback_error" in proposal:
+                import streamlit as st
+                st.error("❌ OpenAI API Error Detected!")
+                if "_error" in proposal:
+                    st.error(f"**Primary Error:** {proposal['_error']}")
+                if "_fallback_error" in proposal:
+                    st.error(f"**Fallback Error:** {proposal['_fallback_error']}")
+                st.warning("💡 Check your OpenAI API key configuration in Streamlit secrets")
+
             self._display_agent_message("DS", "Here's the SQL implementation:")
             self._display_sql(proposal.get("sql") or proposal.get("duckdb_sql", ""))
 
