@@ -112,6 +112,18 @@ class ChatChain:
         if depth > self.max_rollback_depth:
             raise RuntimeError(f"Max rollback depth ({self.max_rollback_depth}) exceeded")
 
+        # Refresh catalog to ensure we have latest table schema
+        # (handles case where ChatChain was initialized before data upload)
+        old_catalog = self.catalog
+        self.catalog = self._build_catalog()
+
+        # Log catalog status for debugging
+        import streamlit as st
+        if not self.catalog:
+            st.warning("⚠️ No tables found in catalog. Please upload data first.")
+        elif old_catalog != self.catalog:
+            st.info(f"📊 Catalog refreshed: {len(self.catalog)} table(s) available")
+
         # Generate trace ID
         run_id = self._generate_trace_id()
         self.last_run_id = run_id  # Store for app.py to access consensus artifact
