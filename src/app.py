@@ -13745,6 +13745,12 @@ def run_domain_agnostic_analysis(user_question: str):
                                     st.info(f"▶️ Phase {phase_idx}/{len(phases)}: {phase_name}")
                                     st.markdown(f"*{phase_desc}*")
 
+                                    # Detect clustering/unsupervised workflow
+                                    is_clustering_workflow = any(
+                                        p.get("phase") in ["clustering", "cluster_analysis"]
+                                        for p in phases
+                                    )
+
                                     # Prepare phase context (JSON-serializable only)
                                     # Add phase-specific instructions to guide DS
                                     phase_instructions = {
@@ -13878,7 +13884,53 @@ if len(numeric_cols) > 0:
 - Follow the template structure exactly""",
                                         "keyword_extraction": "Generate PYTHON CODE for text analysis. DO NOT generate SQL.",
                                         "sentiment_analysis": "Generate PYTHON CODE for sentiment analysis. DO NOT generate SQL.",
-                                        "feature_engineering": """**Phase 2: Feature Engineering**
+                                        "feature_engineering": ("""**Phase 2: Feature Engineering (Clustering/Unsupervised)**
+
+🚨 CRITICAL: This is UNSUPERVISED learning - there is NO target variable!
+
+**MANDATORY CODE TEMPLATE** (follow this EXACTLY):
+
+```python
+import pandas as pd
+import numpy as np
+
+df = st.session_state.cleaned_dataset
+
+# Discover columns - DO NOT hardcode any names
+numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+categorical_cols = df.select_dtypes(include=['object', 'bool']).columns.tolist()
+all_cols = df.columns.tolist()
+
+st.write("### Feature Engineering Overview")
+st.write(f"Total columns: {len(all_cols)}")
+st.write(f"Numeric features: {numeric_cols}")
+st.write(f"Categorical features: {categorical_cols}")
+
+# NO TARGET VARIABLE for clustering!
+# Exclude ID columns from features
+id_cols = [col for col in all_cols if 'id' in col.lower() or 'cust' in col.lower()]
+feature_cols = [col for col in numeric_cols if col not in id_cols]
+
+st.write(f"### Features for clustering ({len(feature_cols)}): {feature_cols}")
+st.write(f"### Excluded ID columns: {id_cols}")
+
+# Store metadata for next phase
+st.session_state.ml_metadata = {
+    'feature_cols': feature_cols,
+    'numeric_features': feature_cols,
+    'categorical_features': [],  # Exclude categorical from clustering
+    'id_cols': id_cols
+}
+```
+
+**ABSOLUTE RULES:**
+- ❌ NO target variable identification
+- ❌ NEVER write: df['Revenue'] or df['BounceRates']
+- ❌ NEVER hardcode column names in quotes
+- ✅ ONLY use: programmatic discovery with .columns.tolist()
+- ✅ Exclude ID columns from features (check for 'id', 'cust' in column name)
+- DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'
+""" if is_clustering_workflow else """**Phase 2: Feature Engineering (Supervised ML)**
 
 🚨 CRITICAL: You DO NOT KNOW the column names. Use ONLY programmatic discovery.
 
@@ -13901,8 +13953,6 @@ st.write(f"Numeric features: {numeric_cols}")
 st.write(f"Categorical features: {categorical_cols}")
 
 # Identify target variable (from user question context)
-# Look for boolean or binary columns that match the prediction goal
-# Example: for "predict revenue", look for 'Revenue' in columns
 target_col = None
 for col in all_cols:
     if 'revenue' in col.lower() or 'target' in col.lower() or 'label' in col.lower():
@@ -13910,10 +13960,8 @@ for col in all_cols:
         break
 
 if target_col is None and len(categorical_cols) > 0:
-    # Use the last categorical column as target if no obvious target found
     target_col = categorical_cols[-1]
 elif target_col is None and len(numeric_cols) > 0:
-    # Or use the last numeric column
     target_col = numeric_cols[-1]
 
 st.write(f"### Identified Target Variable: {target_col}")
@@ -13939,7 +13987,7 @@ st.session_state.ml_metadata = {
 - ✅ ONLY use: programmatic discovery with .columns.tolist()
 - ✅ Use string matching to find target (e.g., 'revenue' in col.lower())
 - DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'
-- Store ml_metadata in session state for Phase 3""",
+"""),
                                         "model_training": """**Phase 3: Model Training**
 
 🚨 CRITICAL: Use metadata from Phase 2. DO NOT hardcode column names.
