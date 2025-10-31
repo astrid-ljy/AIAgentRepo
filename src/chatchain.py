@@ -390,8 +390,8 @@ class ChatChain:
                 "dialect": "duckdb"
             }
 
-            # Call Validator Agent
-            validation_response = self.llm_function(validator_prompt, validator_payload)
+            # Call Validator Agent (convert payload to JSON string)
+            validation_response = self.llm_function(validator_prompt, json.dumps(validator_payload))
 
             # Parse response (handle both dict and JSON string)
             if isinstance(validation_response, str):
@@ -455,8 +455,8 @@ class ChatChain:
                     "dialect": "duckdb"
                 }
 
-                # Call Validator Agent
-                validation_response = self.llm_function(validator_prompt, validator_payload)
+                # Call Validator Agent (convert payload to JSON string)
+                validation_response = self.llm_function(validator_prompt, json.dumps(validator_payload))
 
                 # Parse response (handle both dict and JSON string)
                 if isinstance(validation_response, str):
