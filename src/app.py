@@ -50,7 +50,6 @@ except ImportError:
 try:
     from chatchain import ChatChain
     from agent_contracts import DSProposal, AMCritique, JudgeVerdict
-    from sql_validator import Validator
     from agent_memory import Memory
     from atomic_chat import AtomicChat, Budget
     _CHATCHAIN_AVAILABLE = True
