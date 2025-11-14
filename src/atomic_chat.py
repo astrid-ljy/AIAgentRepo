@@ -619,10 +619,34 @@ class Agent:
         Returns:
             Refined approach, optionally with validation results
         """
+        # CRITICAL FIX: Extract cumulative business decisions from dialogue history
+        # This solves the problem of DS asking same questions AM already answered
+        cumulative_business_decisions = {}
+        last_am_feedback = []
+        previous_ds_response = None
+
+        if dialogue_history:
+            for entry in dialogue_history:
+                # Aggregate all AM business decisions
+                if entry.get("role") == "am" and entry.get("action") == "review":
+                    content = entry.get("content", {})
+                    if isinstance(content, dict) and "business_decisions" in content:
+                        cumulative_business_decisions.update(content["business_decisions"])
+                    # Also capture latest AM feedback
+                    if isinstance(content, dict) and "feedback_to_ds" in content:
+                        last_am_feedback = content["feedback_to_ds"]
+
+                # Capture previous DS response for diff-based revision
+                if entry.get("role") == "ds" and entry.get("action") == "review":
+                    previous_ds_response = entry.get("content", {})
+
         payload = {
             "original_approach": original_approach,
             "am_critique": am_critique,
             "dialogue_history": dialogue_history or [],
+            "cumulative_business_decisions": cumulative_business_decisions,  # NEW: Flattened decisions
+            "last_am_feedback": last_am_feedback,  # NEW: Latest feedback
+            "previous_ds_response": previous_ds_response,  # NEW: For diff-based revision
             "validation_capability": execute_fn is not None
         }
 

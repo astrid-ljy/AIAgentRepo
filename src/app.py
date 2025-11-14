@@ -2189,18 +2189,40 @@ Your job: validate feasibility and refine the execution plan.
   }
 }
 
-## DIALOGUE_HISTORY (CHECK FOR PREVIOUS ANSWERS!)
+## MANDATORY FIRST STEP: CHECK cumulative_business_decisions
 
-If dialogue_history is provided, CHECK IT FIRST:
-- Look for AM's previous "business_decisions" field
-- AM may have already answered your questions!
-- Example: If you asked "Should we use elbow method?" in round 1, AM may have answered in business_decisions: {"n_clusters_approach": "Use elbow method"}
-- DO NOT ask the same question twice! Use AM's answer instead.
+You now receive a "cumulative_business_decisions" field with ALL AM's answers:
+```json
+{
+  "cumulative_business_decisions": {
+    "n_clusters_approach": "Use elbow method first to determine optimal k",
+    "outlier_treatment": "Keep outliers but flag them in analysis"
+  },
+  "last_am_feedback": ["Add marketing recommendations to Phase 4", ...]
+}
+```
 
-If this is round 2+ (revision):
-- Check what AM asked you to fix in "feedback_to_ds"
-- Address ONLY those specific points
-- Confirm you addressed each point in "addressing_feedback"
+BEFORE doing anything else, you MUST:
+
+1. **Acknowledge each business decision** (REQUIRED - output this field):
+```json
+{
+  "am_decisions_acknowledged": {
+    "n_clusters": "✅ AM decided: Use elbow method (from cumulative_business_decisions)",
+    "outliers": "✅ AM decided: Keep outliers but flag (from cumulative_business_decisions)"
+  }
+}
+```
+
+2. **Check if this is a revision** (look for previous_ds_response):
+- If previous_ds_response exists → This is Round 2, you're revising
+- Set `revision_mode: true`
+- Address ONLY what's in `last_am_feedback`
+- List changes in `addressing_feedback`
+
+3. **DO NOT re-ask answered questions:**
+- If cumulative_business_decisions has "n_clusters_approach" → DON'T ask about n_clusters again
+- Use the decision in your plan instead
 
 ## YOUR TASKS
 
@@ -2448,16 +2470,21 @@ IMPORTANT: Check if this is a revision (AM sent feedback). If so, add:
 ## OUTPUT REQUIREMENTS
 
 You MUST return a JSON object with these REQUIRED fields:
-1. "revision_mode" - true if responding to AM feedback, false for first proposal
-2. "detailed_process_explanation" - VERBOSE plain language explanation (minimum 8 sentences) explaining:
+1. "am_decisions_acknowledged" - Dict acknowledging EACH decision in cumulative_business_decisions (MANDATORY)
+2. "revision_mode" - true if previous_ds_response exists, false for first proposal
+3. "addressing_feedback" - If revision_mode=true, list how you addressed each item in last_am_feedback
+4. "detailed_process_explanation" - VERBOSE plain language explanation (minimum 8 sentences) explaining:
    - What AM asked for
+   - Acknowledgment: "I see AM decided X in cumulative_business_decisions"
    - Your feasibility check results
    - Your proposed technical approach step-by-step
    - How you address AM's considerations
-   - Questions you need AM to decide
-3. "ds_technical_review" - Technical specs and implementation details
-4. "refined_approach" - Phases breakdown
-5. "questions_for_am" - Business questions (check dialogue_history first! Don't repeat!)
+   - Questions you need AM to decide (ONLY if not already in cumulative_business_decisions!)
+5. "ds_technical_review" - Technical specs and implementation details
+6. "refined_approach" - Phases breakdown
+7. "questions_for_am" - Business questions NOT already answered (check cumulative_business_decisions first!)
+
+CRITICAL: If cumulative_business_decisions contains answer to your question, DON'T ask it again - use the decision!
 
 Return ONLY a single JSON object with ALL required fields.
 """
@@ -10429,6 +10456,10 @@ def build_shared_context() -> Dict[str, Any]:
     # Suggest query approach based on question and available schema
     query_suggestions = suggest_query_approach(current_question, schema_info) if current_question else {}
 
+    # CRITICAL FIX: Include detected workflow type for proper template routing
+    detected_workflow = getattr(st.session_state, 'detected_workflow', 'general_analysis')
+    is_clustering = getattr(st.session_state, 'is_clustering', False)
+
     return {
         "cached_results": cached_results,
         "recent_sql_results": recent_sql_results,
@@ -10448,7 +10479,10 @@ def build_shared_context() -> Dict[str, Any]:
         "column_mappings": column_mappings,
         "query_suggestions": query_suggestions,
         "referenced_entities": getattr(st.session_state, 'last_am_json', {}).get('referenced_entities', {}),
-        "context_timestamp": pd.Timestamp.now().isoformat()
+        "context_timestamp": pd.Timestamp.now().isoformat(),
+        # NEW: Workflow detection for proper template routing
+        "detected_workflow": detected_workflow,
+        "is_clustering": is_clustering
     }
 
 

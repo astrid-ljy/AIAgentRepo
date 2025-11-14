@@ -129,6 +129,35 @@ class ChatChain:
         self.last_run_id = run_id  # Store for app.py to access consensus artifact
         budget = Budget(**self.budget_per_run)
 
+        # CRITICAL FIX: Detect workflow type early for proper template routing
+        question_lower = user_question.lower()
+        is_clustering = any(kw in question_lower for kw in ["cluster", "segment", "group"])
+        is_supervised_ml = any(kw in question_lower for kw in ["predict", "forecast", "classify"]) or \
+                          any(kw in question_lower for kw in ["model", "train"])
+        is_eda = any(kw in question_lower for kw in ["explore", "understand", "investigate", "what does"])
+
+        # Determine workflow type
+        if is_clustering:
+            detected_workflow = "clustering_unsupervised"
+        elif is_supervised_ml:
+            detected_workflow = "supervised_ml"
+        elif is_eda:
+            detected_workflow = "eda"
+        else:
+            detected_workflow = "general_analysis"
+
+        # Store detected workflow for context building
+        self.detected_workflow = detected_workflow
+        self.is_clustering = is_clustering
+
+        # Store in session state so build_shared_context can access it
+        import streamlit as st
+        st.session_state.detected_workflow = detected_workflow
+        st.session_state.is_clustering = is_clustering
+
+        self.add_msg_fn("assistant", f"🔍 **Detected Workflow:** {detected_workflow}")
+        self.render_chat_fn()
+
         try:
             # ========== PHASE 1: PLAIN LANGUAGE DISCUSSION (AM-LED) ==========
             self.add_msg_fn("system", "💬 Phase 1: AM analyzes intent and sets direction...")
@@ -215,9 +244,23 @@ class ChatChain:
                     execute_fn=self.execute_readonly_fn
                 )
 
+                # Display DS's acknowledgment of AM decisions
+                if ds_review.get("am_decisions_acknowledged"):
+                    self._display_agent_message("DS", "**Acknowledging AM's Decisions:**")
+                    for key, ack in ds_review["am_decisions_acknowledged"].items():
+                        self.add_msg_fn("assistant", f"  - **{key}:** {ack}")
+
+                # Display revision mode and addressing feedback
+                if ds_review.get("revision_mode"):
+                    self.add_msg_fn("assistant", "\n**🔄 Revision Mode:** Addressing AM's feedback")
+                    if ds_review.get("addressing_feedback"):
+                        self.add_msg_fn("assistant", "**Changes Made:**")
+                        for change in ds_review["addressing_feedback"]:
+                            self.add_msg_fn("assistant", f"  - {change}")
+
                 # Display DS's detailed process explanation
                 if ds_review.get("detailed_process_explanation"):
-                    self._display_agent_message("DS", "**Technical Response:**")
+                    self.add_msg_fn("assistant", "\n**Technical Response:**")
                     explanation = ds_review["detailed_process_explanation"]
                     # Split by paragraphs
                     for paragraph in explanation.split("\n\n"):
