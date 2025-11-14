@@ -399,121 +399,123 @@ class ChatChain:
                     am_direction = {**am_direction, "am_feedback": am_review}
                     continue
 
-            # CRITICAL: Post-process approach to detect multi-phase workflows
-            # The LLM often ignores JSON format specs, so we detect and inject workflow_type
+            # CRITICAL: Post-process approach to detect multi-phase workflows and inject proper phases
+            # This runs ALWAYS to ensure clustering gets 5 phases, ML gets 4 phases, etc.
+            # Detect EDA or ML from user question or approach content
+            eda_keywords = [
+                "exploratory data analysis", "eda", "explore the data", "explore data",
+                "data exploration", "exploratory analysis"
+            ]
+            ml_keywords = [
+                "predictive model", "predict", "train model", "build model",
+                "machine learning", "classification", "regression", "forecast",
+                "train a model", "build a model", "prediction model",
+                # Unsupervised learning keywords
+                "clustering", "cluster", "segmentation", "segment", "unsupervised",
+                "customer segmentation", "customer segment", "group customers",
+                "k-means", "kmeans", "dbscan", "hierarchical clustering"
+            ]
+            question_lower = user_question.lower()
+            approach_text = str(approach.get("approach_summary", "")) + " " + str(approach.get("key_steps", []))
+            approach_lower = approach_text.lower()
+
+            # Check if ML, EDA, or multi-phase is mentioned
+            is_ml = any(kw in question_lower for kw in ml_keywords)
+            is_eda = any(kw in question_lower for kw in eda_keywords)
+            mentions_phases = "phase 1" in approach_lower and "phase 2" in approach_lower and "phase 3" in approach_lower
+
+            # Detect clustering/segmentation specifically
+            clustering_keywords = ["clustering", "cluster", "segmentation", "segment", "unsupervised", "k-means", "kmeans", "dbscan"]
+            is_clustering = any(kw in question_lower for kw in clustering_keywords)
+
+            # Set workflow_type if not already set
             if not approach.get("workflow_type"):
-                # Detect EDA or ML from user question or approach content
-                eda_keywords = [
-                    "exploratory data analysis", "eda", "explore the data", "explore data",
-                    "data exploration", "exploratory analysis"
-                ]
-                ml_keywords = [
-                    "predictive model", "predict", "train model", "build model",
-                    "machine learning", "classification", "regression", "forecast",
-                    "train a model", "build a model", "prediction model",
-                    # Unsupervised learning keywords
-                    "clustering", "cluster", "segmentation", "segment", "unsupervised",
-                    "customer segmentation", "customer segment", "group customers",
-                    "k-means", "kmeans", "dbscan", "hierarchical clustering"
-                ]
-                question_lower = user_question.lower()
-                approach_text = str(approach.get("approach_summary", "")) + " " + str(approach.get("key_steps", []))
-                approach_lower = approach_text.lower()
-
-                # Check if ML, EDA, or multi-phase is mentioned
-                is_ml = any(kw in question_lower for kw in ml_keywords)
-                is_eda = any(kw in question_lower for kw in eda_keywords)
-                mentions_phases = "phase 1" in approach_lower and "phase 2" in approach_lower and "phase 3" in approach_lower
-
-                # Detect clustering/segmentation specifically
-                clustering_keywords = ["clustering", "cluster", "segmentation", "segment", "unsupervised", "k-means", "kmeans", "dbscan"]
-                is_clustering = any(kw in question_lower for kw in clustering_keywords)
-
                 if is_ml or is_eda or mentions_phases:
-                    # Inject multi-phase workflow structure
                     approach["workflow_type"] = "multi_phase"
 
-                    # Try to extract phases from key_steps if they mention phases
-                    # CRITICAL: Override if phases is missing OR if it's clustering without proper 5-phase structure
-                    existing_phases = approach.get("phases", [])
-                    needs_clustering_phases = is_clustering and (not existing_phases or len(existing_phases) < 5)
+            # ALWAYS check and inject proper phases for multi-phase workflows
+            if approach.get("workflow_type") == "multi_phase":
+                # Try to extract phases from key_steps if they mention phases
+                # CRITICAL: Override if phases is missing OR if it's clustering without proper 5-phase structure
+                existing_phases = approach.get("phases", [])
+                needs_clustering_phases = is_clustering and (not existing_phases or len(existing_phases) < 5)
 
-                    if not existing_phases or needs_clustering_phases:
-                        if is_clustering:
-                            # Clustering/Segmentation phases - Unsupervised learning workflow (5 phases)
-                            # Phase 1: Retrieve ALL raw data (no target variable for unsupervised!)
-                            # Phase 2: Feature engineering for clustering
-                            # Phase 3: Apply clustering algorithm
-                            # Phase 4: Visualization
-                            # Phase 5: Business analysis and recommendations
-                            approach["phases"] = [
-                                {
-                                    "phase": "data_retrieval_and_cleaning",
-                                    "description": "Retrieve ALL raw data using SELECT * FROM table (NO LIMIT, NO GROUP BY, NO aggregation). ALL columns and ALL rows needed for clustering. Perform data cleaning: type validation, missing values, deduplication. Store cleaned dataset."
-                                },
-                                {
-                                    "phase": "feature_engineering",
-                                    "description": "Select behavioral features (exclude ID columns), scale features using StandardScaler, create derived features if useful. NO target variable identification - clustering is unsupervised. Python only, NO SQL."
-                                },
-                                {
-                                    "phase": "clustering_execution",
-                                    "description": "Determine optimal k using elbow method (unless user specified), apply clustering algorithm (KMeans/DBSCAN), assign cluster labels, calculate silhouette score. Python only, NO SQL."
-                                },
-                                {
-                                    "phase": "visualization",
-                                    "description": "Create PCA/t-SNE visualization of clusters, generate elbow plot (if k was determined), show cluster distribution bar chart. Python only, NO SQL."
-                                },
-                                {
-                                    "phase": "business_analysis",
-                                    "description": "Profile each cluster with plain-language descriptions, provide marketing recommendations for each segment, create comparison table, suggest retention strategies. Python only, NO SQL."
-                                }
-                            ]
-                            import streamlit as st
-                            st.info(f"🔍 Auto-detected Clustering workflow: {len(approach['phases'])} phases planned (including business analysis)")
-                        elif is_ml:
-                            # Supervised ML phases - Classification/Regression pipeline
-                            # Phase 1: Retrieve ALL raw data (need both positive and negative examples!)
-                            # Phases 2-4: Feature engineering, training, evaluation
-                            approach["phases"] = [
-                                {
-                                    "phase": "data_retrieval_and_cleaning",
-                                    "description": "Retrieve ALL raw data using SELECT * FROM table (NO LIMIT, NO GROUP BY, NO WHERE filtering target). ALL columns and ALL rows needed for ML training. Perform data cleaning: type validation, missing values, deduplication. Store cleaned dataset."
-                                },
-                                {
-                                    "phase": "feature_engineering",
-                                    "description": "Identify target variable, analyze features, handle categorical encoding, select features for modeling. Python only, NO SQL."
-                                },
-                                {
-                                    "phase": "model_training",
-                                    "description": "Train classification/regression model with train/test split using sklearn. Python only, NO SQL."
-                                },
-                                {
-                                    "phase": "model_evaluation",
-                                    "description": "Calculate metrics (accuracy/RMSE/R²), show feature importance, visualize predictions. Python only, NO SQL."
-                                }
-                            ]
-                            import streamlit as st
-                            st.info(f"🔍 Auto-detected ML workflow: {len(approach['phases'])} phases planned")
-                        else:
-                            # Default EDA phases - Following proper data science workflow
-                            # Phase 1: Retrieve RAW data and perform comprehensive cleaning
-                            # Phases 2-3: Work with cleaned dataset
-                            approach["phases"] = [
-                                {
-                                    "phase": "data_retrieval_and_cleaning",
-                                    "description": "Retrieve ALL raw data using SELECT * FROM table (NO LIMIT, NO GROUP BY, NO aggregation). Perform data cleaning: type validation, missing values, deduplication. Store cleaned dataset."
-                                },
-                                {
-                                    "phase": "statistical_analysis",
-                                    "description": "Calculate descriptive statistics, correlations, distributions using cleaned dataset from session state. Python only, NO SQL."
-                                },
-                                {
-                                    "phase": "visualization",
-                                    "description": "Create histograms, box plots, scatter plots, correlation heatmaps using cleaned dataset. Python only, NO SQL."
-                                }
-                            ]
-                            import streamlit as st
-                            st.info(f"🔍 Auto-detected EDA workflow: {len(approach['phases'])} phases planned")
+                if not existing_phases or needs_clustering_phases:
+                    if is_clustering:
+                        # Clustering/Segmentation phases - Unsupervised learning workflow (5 phases)
+                        # Phase 1: Retrieve ALL raw data (no target variable for unsupervised!)
+                        # Phase 2: Feature engineering for clustering
+                        # Phase 3: Apply clustering algorithm
+                        # Phase 4: Visualization
+                        # Phase 5: Business analysis and recommendations
+                        approach["phases"] = [
+                            {
+                                "phase": "data_retrieval_and_cleaning",
+                                "description": "Retrieve ALL raw data using SELECT * FROM table (NO LIMIT, NO GROUP BY, NO aggregation). ALL columns and ALL rows needed for clustering. Perform data cleaning: type validation, missing values, deduplication. Store cleaned dataset."
+                            },
+                            {
+                                "phase": "feature_engineering",
+                                "description": "Select behavioral features (exclude ID columns), scale features using StandardScaler, create derived features if useful. NO target variable identification - clustering is unsupervised. Python only, NO SQL."
+                            },
+                            {
+                                "phase": "clustering_execution",
+                                "description": "Determine optimal k using elbow method (unless user specified), apply clustering algorithm (KMeans/DBSCAN), assign cluster labels, calculate silhouette score. Python only, NO SQL."
+                            },
+                            {
+                                "phase": "visualization",
+                                "description": "Create PCA/t-SNE visualization of clusters, generate elbow plot (if k was determined), show cluster distribution bar chart. Python only, NO SQL."
+                            },
+                            {
+                                "phase": "business_analysis",
+                                "description": "Profile each cluster with plain-language descriptions, provide marketing recommendations for each segment, create comparison table, suggest retention strategies. Python only, NO SQL."
+                            }
+                        ]
+                        import streamlit as st
+                        st.info(f"🔍 Auto-detected Clustering workflow: {len(approach['phases'])} phases planned (including business analysis)")
+                    elif is_ml:
+                        # Supervised ML phases - Classification/Regression pipeline
+                        # Phase 1: Retrieve ALL raw data (need both positive and negative examples!)
+                        # Phases 2-4: Feature engineering, training, evaluation
+                        approach["phases"] = [
+                            {
+                                "phase": "data_retrieval_and_cleaning",
+                                "description": "Retrieve ALL raw data using SELECT * FROM table (NO LIMIT, NO GROUP BY, NO WHERE filtering target). ALL columns and ALL rows needed for ML training. Perform data cleaning: type validation, missing values, deduplication. Store cleaned dataset."
+                            },
+                            {
+                                "phase": "feature_engineering",
+                                "description": "Identify target variable, analyze features, handle categorical encoding, select features for modeling. Python only, NO SQL."
+                            },
+                            {
+                                "phase": "model_training",
+                                "description": "Train classification/regression model with train/test split using sklearn. Python only, NO SQL."
+                            },
+                            {
+                                "phase": "model_evaluation",
+                                "description": "Calculate metrics (accuracy/RMSE/R²), show feature importance, visualize predictions. Python only, NO SQL."
+                            }
+                        ]
+                        import streamlit as st
+                        st.info(f"🔍 Auto-detected ML workflow: {len(approach['phases'])} phases planned")
+                    else:
+                        # Default EDA phases - Following proper data science workflow
+                        # Phase 1: Retrieve RAW data and perform comprehensive cleaning
+                        # Phases 2-3: Work with cleaned dataset
+                        approach["phases"] = [
+                            {
+                                "phase": "data_retrieval_and_cleaning",
+                                "description": "Retrieve ALL raw data using SELECT * FROM table (NO LIMIT, NO GROUP BY, NO aggregation). Perform data cleaning: type validation, missing values, deduplication. Store cleaned dataset."
+                            },
+                            {
+                                "phase": "statistical_analysis",
+                                "description": "Calculate descriptive statistics, correlations, distributions using cleaned dataset from session state. Python only, NO SQL."
+                            },
+                            {
+                                "phase": "visualization",
+                                "description": "Create histograms, box plots, scatter plots, correlation heatmaps using cleaned dataset. Python only, NO SQL."
+                            }
+                        ]
+                        import streamlit as st
+                        st.info(f"🔍 Auto-detected EDA workflow: {len(approach['phases'])} phases planned")
 
             # Debug: Log what we're storing
             import streamlit as st
