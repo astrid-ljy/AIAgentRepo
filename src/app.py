@@ -14855,6 +14855,9 @@ df = st.session_state.cleaned_dataset
 clustering_results = st.session_state.clustering_results
 ml_metadata = st.session_state.ml_metadata
 
+# CRITICAL: Restore Cluster column from clustering results
+df['Cluster'] = clustering_results['labels']
+
 n_clusters = clustering_results['n_clusters']
 feature_cols = clustering_results['feature_cols']
 X = df[feature_cols].values
@@ -15405,11 +15408,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.decomposition import PCA
+import duckdb
 
 # Load data and clustering results
 df = st.session_state.cleaned_dataset
 clustering_results = st.session_state.clustering_results
 ml_metadata = st.session_state.ml_metadata
+
+# CRITICAL: Restore Cluster column from clustering results
+df['Cluster'] = clustering_results['labels']
 
 n_clusters = clustering_results['n_clusters']
 feature_cols = clustering_results['feature_cols']
@@ -15721,6 +15728,13 @@ st.success("✅ Detailed cluster analysis with SQL deep dive complete!")
                                             import numpy as np
                                             import matplotlib.pyplot as plt
                                             import seaborn as sns
+                                            import duckdb
+                                            import sklearn
+                                            from sklearn.cluster import KMeans
+                                            from sklearn.decomposition import PCA
+                                            from sklearn.preprocessing import StandardScaler, LabelEncoder
+                                            from sklearn.metrics import silhouette_score
+                                            from sklearn.model_selection import train_test_split
 
                                             # Execute the Python code with access to streamlit and data science libraries
                                             exec_globals = {
@@ -15728,7 +15742,15 @@ st.success("✅ Detailed cluster analysis with SQL deep dive complete!")
                                                 "pd": pd,
                                                 "np": np,
                                                 "plt": plt,
-                                                "sns": sns
+                                                "sns": sns,
+                                                "duckdb": duckdb,
+                                                "sklearn": sklearn,
+                                                "KMeans": KMeans,
+                                                "PCA": PCA,
+                                                "StandardScaler": StandardScaler,
+                                                "LabelEncoder": LabelEncoder,
+                                                "silhouette_score": silhouette_score,
+                                                "train_test_split": train_test_split
                                             }
 
                                             # Execute the code
