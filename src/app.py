@@ -14837,7 +14837,114 @@ if len(categorical_cols) > 0 and len(numeric_cols) > 0:
 - ✅ ONLY access columns via discovered lists
 - DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'
 - Follow the template structure exactly""",
-                                        "visualization": """**Phase 3: Visualization**
+                                        "visualization": ("""**Phase 4: Cluster Visualization**
+
+🚨 CRITICAL: Create PCA visualizations and cluster distribution plots.
+
+**MANDATORY CODE TEMPLATE** (follow this EXACTLY):
+
+```python
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.decomposition import PCA
+
+# Load data and clustering results
+df = st.session_state.cleaned_dataset
+clustering_results = st.session_state.clustering_results
+ml_metadata = st.session_state.ml_metadata
+
+n_clusters = clustering_results['n_clusters']
+feature_cols = clustering_results['feature_cols']
+X = df[feature_cols].values
+
+st.write("# 🎨 Cluster Visualizations")
+
+# Visualization 1: PCA 2D Scatter Plot with Clusters
+st.write("## 📊 PCA Visualization of Clusters")
+pca_2d = PCA(n_components=2, random_state=42)
+X_pca = pca_2d.fit_transform(X)
+
+fig, ax = plt.subplots(figsize=(12, 8))
+scatter = ax.scatter(X_pca[:, 0], X_pca[:, 1],
+                     c=df['Cluster'],
+                     cmap='viridis',
+                     alpha=0.6,
+                     edgecolors='black',
+                     s=50)
+ax.set_xlabel(f'Principal Component 1 ({pca_2d.explained_variance_ratio_[0]:.1%} variance)')
+ax.set_ylabel(f'Principal Component 2 ({pca_2d.explained_variance_ratio_[1]:.1%} variance)')
+ax.set_title('Customer Segments - PCA Visualization')
+ax.grid(True, alpha=0.3)
+
+# Add cluster centroids
+centroids_pca = pca_2d.transform(clustering_results['cluster_centers'])
+ax.scatter(centroids_pca[:, 0], centroids_pca[:, 1],
+          c='red', marker='X', s=300, edgecolors='black', linewidths=2,
+          label='Centroids')
+ax.legend()
+
+# Add colorbar
+cbar = plt.colorbar(scatter, ax=ax)
+cbar.set_label('Cluster ID')
+
+st.pyplot(fig)
+
+# Visualization 2: Cluster Distribution Bar Chart
+st.write("## 📈 Cluster Size Distribution")
+cluster_counts = df['Cluster'].value_counts().sort_index()
+
+fig, ax = plt.subplots(figsize=(10, 6))
+bars = ax.bar(cluster_counts.index, cluster_counts.values,
+              color=plt.cm.viridis(np.linspace(0, 1, n_clusters)),
+              edgecolor='black', linewidth=1.5)
+ax.set_xlabel('Cluster ID')
+ax.set_ylabel('Number of Customers')
+ax.set_title('Customer Distribution Across Segments')
+ax.grid(True, alpha=0.3, axis='y')
+
+# Add value labels on bars
+for bar in bars:
+    height = bar.get_height()
+    ax.text(bar.get_x() + bar.get_width()/2., height,
+           f'{int(height)}\\n({height/len(df)*100:.1f}%)',
+           ha='center', va='bottom', fontweight='bold')
+
+st.pyplot(fig)
+
+# Visualization 3: Cluster Feature Comparison (Radar Chart or Heatmap)
+st.write("## 🔍 Cluster Feature Profiles")
+
+# Normalize cluster centers for visualization
+cluster_centers_norm = clustering_results['cluster_centers']
+cluster_comparison = pd.DataFrame(
+    cluster_centers_norm,
+    columns=feature_cols,
+    index=[f'Cluster {i}' for i in range(n_clusters)]
+)
+
+# Show top 10 features for readability
+top_features = feature_cols[:min(10, len(feature_cols))]
+fig, ax = plt.subplots(figsize=(12, 8))
+sns.heatmap(cluster_comparison[top_features].T, annot=True, fmt='.2f',
+           cmap='RdYlGn', center=0, ax=ax, cbar_kws={'label': 'Normalized Value'})
+ax.set_xlabel('Cluster')
+ax.set_ylabel('Feature')
+ax.set_title('Cluster Centroids Heatmap (Normalized Features)')
+
+st.pyplot(fig)
+
+st.success("✅ Cluster visualizations complete!")
+```
+
+**ABSOLUTE RULES:**
+- ✅ Create PCA scatter plot with cluster colors
+- ✅ Show cluster distribution bar chart
+- ✅ Visualize cluster centroids
+- ✅ Use clustering_results from session state
+- ❌ DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'
+""" if is_clustering_workflow else """**Phase 3: Visualization**
 
 🚨 CRITICAL: You DO NOT KNOW the column names. Use ONLY programmatic discovery.
 
@@ -14895,7 +15002,7 @@ if len(numeric_cols) > 0:
 - ✅ ONLY use: df[numeric_cols] or iterate with for col in numeric_cols
 - ✅ Use st.pyplot(fig) to display figures
 - ❌ DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'
-- Follow the template structure exactly""",
+- Follow the template structure exactly"""),
                                         "keyword_extraction": "Generate PYTHON CODE for text analysis. DO NOT generate SQL.",
                                         "sentiment_analysis": "Generate PYTHON CODE for sentiment analysis. DO NOT generate SQL.",
                                         "feature_engineering": ("""**Phase 2: Feature Engineering (Clustering/Unsupervised)**
@@ -15200,7 +15307,7 @@ st.success("✅ Model evaluation complete!")
 - ✅ Check is_classification to choose appropriate metrics
 - ✅ Use matplotlib/seaborn for visualizations
 - DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'""",
-                                        "clustering": """**Phase 3: Clustering (Unsupervised Learning)**
+                                        "clustering_execution": """**Phase 3: Clustering (Unsupervised Learning)**
 
 🚨 CRITICAL: Use normalized features from Phase 2. NO target variable!
 
@@ -15286,7 +15393,7 @@ st.success("✅ Clustering complete!")
 - ✅ Show elbow curve and silhouette scores
 - ✅ Store clustering_results in session state for Phase 4
 - DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'""",
-                                        "cluster_analysis": """**Phase 4: Cluster Analysis & Business Recommendations**
+                                        "business_analysis": """**Phase 5: Cluster Analysis & Business Recommendations**
 
 🚨 CRITICAL: Provide DETAILED, PLAIN-LANGUAGE analysis for each cluster with actionable business insights.
 
@@ -15505,7 +15612,47 @@ comparison = df.groupby('Cluster')[feature_cols].mean().round(2)
 comparison['Customer_Count'] = df.groupby('Cluster').size()
 st.dataframe(comparison)
 
-st.success("✅ Detailed cluster analysis complete!")
+# === SQL DEEP DIVE FOR EACH CLUSTER ===
+st.write("## 🔍 SQL Deep Dive: Top Customers by Cluster")
+st.write("*Querying top 10 customers from each segment for detailed analysis*")
+
+# Store cluster assignments back to enable SQL queries
+# Add cluster column to original dataframe
+df_with_clusters = df.copy()
+
+# Save to temp table for SQL queries
+import duckdb
+con = duckdb.connect(':memory:')
+con.register('customer_clusters', df_with_clusters)
+
+for cluster_id in range(n_clusters):
+    st.write(f"### 🎯 Segment {cluster_id} - Top 10 Customers")
+
+    # Generate SQL query to get top customers from this cluster
+    # Sort by most relevant metric (e.g., PURCHASES, BALANCE)
+    purchase_cols = [c for c in feature_cols if 'PURCHASE' in c.upper()]
+    balance_cols = [c for c in feature_cols if 'BALANCE' in c.upper()]
+
+    sort_col = purchase_cols[0] if purchase_cols else (balance_cols[0] if balance_cols else feature_cols[0])
+
+    sql_query = f"""
+    SELECT *
+    FROM customer_clusters
+    WHERE Cluster = {cluster_id}
+    ORDER BY "{sort_col}" DESC
+    LIMIT 10
+    """
+
+    st.code(sql_query, language='sql')
+
+    # Execute query
+    top_customers = con.execute(sql_query).df()
+    st.dataframe(top_customers)
+
+    st.write(f"*These {len(top_customers)} customers represent the highest-value members of Segment {cluster_id}*")
+    st.write("---")
+
+st.success("✅ Detailed cluster analysis with SQL deep dive complete!")
 ```
 
 **ABSOLUTE RULES:**
@@ -15514,8 +15661,9 @@ st.success("✅ Detailed cluster analysis complete!")
 - ✅ Generate actionable product recommendations
 - ✅ Assess risk and provide retention strategies
 - ✅ Create clear PCA visualization
+- ✅ Use SQL queries to deep dive into each cluster's top customers
 - ✅ Use business terminology, not technical jargon
-- DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'"""
+- ✅ Output BOTH 'python_code' AND display SQL queries via st.code()"""
                                     }
 
                                     # CRITICAL: Retrieve ML knowledge guidance from RAG system
