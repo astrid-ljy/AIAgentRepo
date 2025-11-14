@@ -2436,13 +2436,7 @@ IMPORTANT: Check if this is a revision (AM sent feedback). If so, add:
 
   "refined_approach": {
     "workflow_type": "multi_phase",
-    "phases": [
-      {
-        "phase": "data_retrieval",
-        "technical_spec": "SELECT * with date filter",
-        "am_key_considerations_addressed": ["Sufficient data", "Recent data only"]
-      }
-    ]
+    "phases": []  // LEAVE EMPTY - clustering phases will be auto-injected based on workflow detection
   },
 
   "questions_for_am": [
