@@ -15638,7 +15638,7 @@ for cluster_id in range(n_clusters):
     sql_query = f"""
     SELECT *
     FROM customer_clusters
-    WHERE Cluster = {cluster_id}
+    WHERE "Cluster" = {cluster_id}
     ORDER BY "{sort_col}" DESC
     LIMIT 10
     """
