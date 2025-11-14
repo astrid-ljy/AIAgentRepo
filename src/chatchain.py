@@ -130,101 +130,172 @@ class ChatChain:
         budget = Budget(**self.budget_per_run)
 
         try:
-            # ========== PHASE 1: PLAIN LANGUAGE DISCUSSION ==========
-            self.add_msg_fn("system", "💬 Phase 1: Discussing approach in plain language...")
+            # ========== PHASE 1: PLAIN LANGUAGE DISCUSSION (AM-LED) ==========
+            self.add_msg_fn("system", "💬 Phase 1: AM analyzes intent and sets direction...")
             self.render_chat_fn()
 
-            # Create agents for plain language discussion
-            ds_approach_agent = Agent(
-                "ds",
-                lambda prompt, payload: self.llm_function(prompt, payload),
-                self.system_prompts.get("DS_APPROACH", self.system_prompts["DS"]),
-                context_builder=self.build_shared_context_fn
-            )
-
-            am_critique_agent = Agent(
+            # Create agents for AM-led workflow
+            am_director_agent = Agent(
                 "am",
                 lambda prompt, payload: self.llm_function(prompt, payload),
-                self.system_prompts.get("AM_CRITIQUE_APPROACH", self.system_prompts.get("AM_CRITIQUE", self.system_prompts["AM"])),
+                self.system_prompts.get("AM_STRATEGIC_DIRECTOR", self.system_prompts["AM"]),
                 context_builder=self.build_shared_context_fn
             )
 
-            # Multi-turn dialogue for approach discussion (max 4 turns)
+            ds_advisor_agent = Agent(
+                "ds",
+                lambda prompt, payload: self.llm_function(prompt, payload),
+                self.system_prompts.get("DS_TECHNICAL_ADVISOR", self.system_prompts["DS"]),
+                context_builder=self.build_shared_context_fn
+            )
+
+            am_reviewer_agent = Agent(
+                "am",
+                lambda prompt, payload: self.llm_function(prompt, payload),
+                self.system_prompts.get("AM_FINAL_REVIEW", self.system_prompts["AM"]),
+                context_builder=self.build_shared_context_fn
+            )
+
+            # AM-led dialogue (max 3 iterations: AM → DS → AM review)
             approach = None
             dialogue_history = []
+            am_direction = None
 
-            for turn in range(4):
-                # DS proposes or refines approach
+            for turn in range(3):
+                # Step 1: AM analyzes and directs (only on first turn or if revisions needed)
                 if turn == 0:
-                    approach = ds_approach_agent.propose_approach(user_question)
-                    self._display_agent_message("DS", approach.get("approach_summary", ""))
-                    self._display_approach_details(approach)
-                else:
-                    # DS refines based on full AM feedback, with validation capability
-                    # Create refine agent with correct prompt
-                    ds_refine_agent = Agent(
-                        "ds",
-                        lambda prompt, payload: self.llm_function(prompt, payload),
-                        self.system_prompts.get("DS_REFINE_APPROACH", self.system_prompts["DS_APPROACH"]),
-                        context_builder=self.build_shared_context_fn
-                    )
+                    am_direction = am_director_agent.propose_approach(user_question)
 
-                    approach = ds_refine_agent.refine_approach(
-                        am_critique=am_critique,
-                        original_approach=approach,
-                        dialogue_history=dialogue_history,
-                        execute_fn=self.execute_readonly_fn
-                    )
+                    # Display AM's strategic direction
+                    if am_direction.get("am_strategic_direction"):
+                        direction = am_direction["am_strategic_direction"]
+                        self._display_agent_message("AM", f"Business Objective: {direction.get('business_objective', '')}")
 
-                    # Display validation if DS ran one
-                    if approach.get("validation_needed") or approach.get("validation_query"):
-                        self.add_msg_fn("assistant", f"🧪 **DS:** {approach.get('validation_reason', 'Testing feasibility...')}")
-                        if approach.get("validation_query"):
-                            self._display_sql(approach.get("validation_query"))
+                        # Display delegated tasks
+                        if direction.get("delegated_tasks"):
+                            tasks = direction["delegated_tasks"]
+                            self.add_msg_fn("assistant", "**📋 Tasks for DS:**")
+                            for task in tasks.get("for_data_scientist", []):
+                                self.add_msg_fn("assistant", f"  - {task}")
 
-                        if approach.get("validation_results"):
-                            # Show first few results
-                            results_preview = str(approach["validation_results"])[:200]
-                            self.add_msg_fn("assistant", f"📊 **Results:** {results_preview}...")
-                        elif approach.get("validation_error"):
-                            self.add_msg_fn("assistant", f"⚠️ **Error:** {approach['validation_error']}")
+                            # Display key considerations
+                            if tasks.get("key_considerations"):
+                                self.add_msg_fn("assistant", "\n**⚠️ Key Considerations:**")
+                                for consideration in tasks["key_considerations"]:
+                                    self.add_msg_fn("assistant", f"  {consideration}")
 
-                        self.render_chat_fn()
+                        # Display extracted parameters
+                        if direction.get("extracted_parameters"):
+                            params = direction["extracted_parameters"]
+                            self.add_msg_fn("assistant", f"\n**🎯 Extracted Parameters:** {params}")
 
-                    # Display DS's response
-                    if approach.get("response_to_am"):
-                        self._display_agent_message("DS", approach["response_to_am"])
-                    else:
-                        self._display_agent_message("DS", f"Updated approach: {approach.get('approach_summary', '')}")
+                    dialogue_history.append({"turn": turn + 1, "role": "am", "action": "direct", "content": am_direction})
+                    self.render_chat_fn()
 
-                    self._display_approach_details(approach)
+                # Step 2: DS validates and refines
+                ds_review = ds_advisor_agent.refine_approach(
+                    am_critique=am_direction,
+                    original_approach=am_direction,
+                    dialogue_history=dialogue_history,
+                    execute_fn=self.execute_readonly_fn
+                )
 
-                dialogue_history.append({"turn": turn + 1, "role": "ds", "content": approach})
+                # Display DS's technical review
+                if ds_review.get("ds_technical_review"):
+                    review = ds_review["ds_technical_review"]
+                    self._display_agent_message("DS", "Technical Feasibility Review:")
+
+                    # Show feasibility validation
+                    if review.get("feasibility_validation"):
+                        validation = review["feasibility_validation"]
+                        self.add_msg_fn("assistant", f"**Schema Check:** {validation.get('schema_check', '')}")
+                        self.add_msg_fn("assistant", f"**Data Sufficiency:** {validation.get('data_sufficiency', '')}")
+
+                    # Show identified risks
+                    if review.get("identified_risks"):
+                        self.add_msg_fn("assistant", "\n**⚠️ Identified Risks:**")
+                        for risk in review["identified_risks"][:3]:
+                            self.add_msg_fn("assistant", f"  - {risk.get('risk', '')}: {risk.get('mitigation', '')}")
+
+                    # Show questions for AM
+                    if ds_review.get("questions_for_am"):
+                        self.add_msg_fn("assistant", "\n**❓ Questions for AM:**")
+                        for question in ds_review["questions_for_am"]:
+                            self.add_msg_fn("assistant", f"  - {question}")
+
+                dialogue_history.append({"turn": turn + 1, "role": "ds", "action": "review", "content": ds_review})
                 self.render_chat_fn()
 
-                # AM critiques approach
-                am_critique = am_critique_agent.critique_approach(approach, user_question, dialogue_history)
-                self._display_agent_message("AM", am_critique.get("feedback", ""))
+                # Step 3: AM reviews and approves/revises
+                am_review = am_reviewer_agent.critique_approach(ds_review, user_question, dialogue_history)
 
-                if am_critique.get("suggestions"):
-                    self._display_suggestions(am_critique["suggestions"])
+                # Display AM's review decision
+                if am_review.get("am_review_decision"):
+                    decision = am_review["am_review_decision"]
+                    self._display_agent_message("AM", f"Decision: {decision.upper()}")
 
-                dialogue_history.append({"turn": turn + 1, "role": "am", "content": am_critique})
+                    # Show feedback
+                    if am_review.get("feedback_to_ds"):
+                        self.add_msg_fn("assistant", "**Feedback:**")
+                        for feedback in am_review["feedback_to_ds"][:3]:
+                            self.add_msg_fn("assistant", f"  {feedback}")
+
+                    # Show business decisions
+                    if am_review.get("business_decisions"):
+                        self.add_msg_fn("assistant", "\n**Business Decisions:**")
+                        for key, value in am_review["business_decisions"].items():
+                            self.add_msg_fn("assistant", f"  - {key}: {value}")
+
+                dialogue_history.append({"turn": turn + 1, "role": "am", "action": "review", "content": am_review})
                 self.render_chat_fn()
 
                 # Check for approval
-                if am_critique.get("decision") == "approve":
-                    if am_critique.get("approval_message"):
-                        self._display_agent_message("AM", am_critique["approval_message"])
-                        self.render_chat_fn()
+                if am_review.get("am_review_decision") == "approve":
+                    # Merge AM direction with DS refinements for final approach
+                    approach = {
+                        "workflow_type": am_direction.get("am_strategic_direction", {}).get("workflow_type", "multi_phase"),
+                        "approach_summary": am_direction.get("am_strategic_direction", {}).get("business_objective", ""),
+                        "am_strategic_direction": am_direction.get("am_strategic_direction", {}),
+                        "ds_technical_review": ds_review.get("ds_technical_review", {}),
+                        "am_final_approval": am_review,
+                        "phases": ds_review.get("refined_approach", {}).get("phases", [])
+                    }
+
+                    self.add_msg_fn("system", "✅ AM approved approach. Proceeding to execution...")
+                    self.render_chat_fn()
+                    break
+
+                # Check for clarify - might need user input
+                if am_review.get("am_review_decision") == "clarify":
+                    self.add_msg_fn("system", "⚠️ AM needs clarification. Please provide more information.")
+                    self.render_chat_fn()
+                    # For now, auto-approve after clarify request
+                    approach = {
+                        "workflow_type": am_direction.get("am_strategic_direction", {}).get("workflow_type", "multi_phase"),
+                        "approach_summary": am_direction.get("am_strategic_direction", {}).get("business_objective", ""),
+                        "phases": ds_review.get("refined_approach", {}).get("phases", [])
+                    }
                     break
 
                 # Check for max turns
-                if turn == 3:
+                if turn == 2:
                     # Auto-approve after max turns
+                    approach = {
+                        "workflow_type": am_direction.get("am_strategic_direction", {}).get("workflow_type", "multi_phase"),
+                        "approach_summary": am_direction.get("am_strategic_direction", {}).get("business_objective", ""),
+                        "phases": ds_review.get("refined_approach", {}).get("phases", [])
+                    }
                     self.add_msg_fn("system", "⚠️ Max discussion turns reached. Proceeding with current approach.")
                     self.render_chat_fn()
                     break
+
+                # If revise, continue to next iteration
+                if am_review.get("am_review_decision") == "revise":
+                    self.add_msg_fn("system", "🔄 AM requested revisions. DS will refine approach...")
+                    self.render_chat_fn()
+                    # Update am_direction with feedback for next iteration
+                    am_direction = {**am_direction, "am_feedback": am_review}
+                    continue
 
             # CRITICAL: Post-process approach to detect multi-phase workflows
             # The LLM often ignores JSON format specs, so we detect and inject workflow_type
