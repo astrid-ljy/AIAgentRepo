@@ -553,7 +553,8 @@ class Agent:
         return response
 
     def generate_code(self, approved_approach: Dict, am_feedback: str,
-                     dialogue_history: List[Dict], question: str) -> Dict:
+                     dialogue_history: List[Dict], question: str,
+                     business_decisions: Dict = None, execution_requirements: List[str] = None) -> Dict:
         """
         DS: Generate SQL/code based on approved approach (Phase 2)
 
@@ -562,6 +563,8 @@ class Agent:
             am_feedback: AM's final feedback and suggestions
             dialogue_history: Phase 1 discussion turns (for context)
             question: User's business question
+            business_decisions: AM's business decisions (e.g., use elbow method, keep outliers)
+            execution_requirements: Actionable requirements derived from business_decisions
 
         Returns:
             SQL query and implementation notes
@@ -580,7 +583,12 @@ class Agent:
             "dialogue_history": dialogue_history,
             "user_question": question,
             "schema_info": shared_context.get("schema_info", {}),
-            "column_mappings": shared_context.get("column_mappings", {})
+            "column_mappings": shared_context.get("column_mappings", {}),
+            # CRITICAL: Business decisions and execution requirements from AM
+            "business_decisions": business_decisions or {},
+            "execution_requirements": execution_requirements or [],
+            "detected_workflow": shared_context.get("detected_workflow", "general_analysis"),
+            "is_clustering": shared_context.get("is_clustering", False)
         }
 
         # Call LLM with generate prompt

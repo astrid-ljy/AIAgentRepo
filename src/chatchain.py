@@ -311,6 +311,20 @@ class ChatChain:
                     decision = am_review["am_review_decision"]
                     self.add_msg_fn("assistant", f"\n**Decision: {decision.upper()}**")
 
+                    # Show changes detected (Round 2 validation)
+                    if am_review.get("changes_detected"):
+                        changes = am_review["changes_detected"]
+                        if changes.get("ds_made_changes"):
+                            self.add_msg_fn("assistant", "\n**✅ Changes Detected:**")
+                            for change in changes.get("specific_changes", []):
+                                self.add_msg_fn("assistant", f"  - {change}")
+                            if changes.get("still_unaddressed"):
+                                self.add_msg_fn("assistant", "\n**⚠️ Still Unaddressed:**")
+                                for issue in changes["still_unaddressed"]:
+                                    self.add_msg_fn("assistant", f"  - {issue}")
+                        else:
+                            self.add_msg_fn("assistant", "\n**❌ No Changes Detected:** DS response identical to Round 1")
+
                     # Show feedback
                     if am_review.get("feedback_to_ds"):
                         self.add_msg_fn("assistant", "\n**Feedback:**")
@@ -515,11 +529,34 @@ class ChatChain:
                 feedback_list = approach["am_final_approval"].get("feedback_to_ds", [])
                 am_feedback = "\n".join(feedback_list) if isinstance(feedback_list, list) else str(feedback_list)
 
+            # CRITICAL FIX: Extract business_decisions and convert to execution requirements
+            # This ensures AM's decisions (like "use elbow method") reach code generation
+            execution_requirements = []
+            business_decisions = {}
+            if approach.get("am_final_approval", {}).get("business_decisions"):
+                business_decisions = approach["am_final_approval"]["business_decisions"]
+
+                # Convert business decisions to actionable requirements
+                for key, decision in business_decisions.items():
+                    if "elbow" in str(decision).lower():
+                        execution_requirements.append("MUST generate elbow plot in Phase 3 clustering to determine optimal k")
+                    if "outlier" in str(key).lower() and "keep" in str(decision).lower():
+                        execution_requirements.append("Keep outliers in data, but flag them in analysis")
+                    if "market" in str(decision).lower() or "recommendation" in str(decision).lower():
+                        execution_requirements.append("Include marketing recommendations in Phase 4 analysis")
+
+            self.add_msg_fn("assistant", f"**📋 Execution Requirements from AM:** {len(execution_requirements)} requirements")
+            for req in execution_requirements:
+                self.add_msg_fn("assistant", f"  - {req}")
+            self.render_chat_fn()
+
             proposal = ds_generate_agent.generate_code(
                 approved_approach=approach,
                 am_feedback=am_feedback,
                 dialogue_history=dialogue_history,
-                question=user_question
+                question=user_question,
+                business_decisions=business_decisions,
+                execution_requirements=execution_requirements
             )
 
             # DEBUG: Check for API errors

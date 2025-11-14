@@ -2665,11 +2665,23 @@ You MUST return a JSON object with these REQUIRED fields:
    - How DS responded to each point
    - Your answers to DS's questions
    - Why you decided to approve/revise/clarify
-3. "alignment_check" - Detailed alignment validation
-4. "feedback_to_ds" - Specific actionable feedback
-5. "business_decisions" - Your answers to ALL questions DS asked (REQUIRED if DS asked questions!)
+3. "changes_detected" - REQUIRED if round 2 (check dialogue_history):
+   {
+     "ds_made_changes": true/false,
+     "specific_changes": [
+       "Phase 4 NOW includes marketing recommendations (was missing before)",
+       "Outlier handling NOW set to 'keep and flag' (was 'undefined' before)"
+     ],
+     "still_unaddressed": []  // Empty if all feedback addressed
+   }
+4. "alignment_check" - Detailed alignment validation
+5. "feedback_to_ds" - Specific actionable feedback
+6. "business_decisions" - Your answers to ALL questions DS asked (REQUIRED if DS asked questions!)
 
-CRITICAL: If DS asked "questions_for_am", you MUST answer them in "business_decisions"!
+CRITICAL VALIDATION RULES:
+- If DS asked "questions_for_am", you MUST answer them in "business_decisions"!
+- If round 2 and changes_detected.ds_made_changes = false → CANNOT approve (must revise or clarify)
+- If round 2 and all feedback addressed → MUST approve (don't infinite loop)
 
 Return ONLY a single JSON object with ALL required fields.
 """
