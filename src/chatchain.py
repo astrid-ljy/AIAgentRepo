@@ -592,54 +592,6 @@ class ChatChain:
             else:
                 raise ValueError(f"Proposal does not contain SQL. Type: {type(proposal)}")
 
-            # Validator Agent - check SQL syntax and schema
-            validator_prompt = self.system_prompts.get("VALIDATOR", "")
-            if not validator_prompt:
-                raise ValueError("VALIDATOR system prompt not found in system_prompts")
-
-            validator_payload = {
-                "sql": sql,
-                "schema_info": self.catalog,
-                "dialect": "duckdb"
-            }
-
-            # Call Validator Agent (convert payload to JSON string)
-            validation_response = self.llm_function(validator_prompt, json.dumps(validator_payload))
-
-            # Parse response (handle both dict and JSON string)
-            if isinstance(validation_response, str):
-                try:
-                    validation = json.loads(validation_response)
-                except json.JSONDecodeError:
-                    # If JSON parsing fails, assume validation failed
-                    validation = {
-                        "ok": False,
-                        "errors": ["Failed to parse validation response"],
-                        "reasoning": validation_response[:200]
-                    }
-            else:
-                validation = validation_response
-
-            # Store validation results
-            self.memory.put_artifact(run_id, "validation", validation, agent="validator")
-
-            if not validation.get("ok", False):
-                # Show validation errors (informational - Judge will decide whether to revise or block)
-                errors = validation.get("errors", ["Unknown validation error"])
-                error_msg = "\n".join([f"• {err}" for err in errors])
-                self._display_agent_message("Validator", f"⚠️ Schema validation issues detected:\n{error_msg}")
-                self.render_chat_fn()
-
-                # Check for schema drift (actual schema changes in database)
-                if self._detect_schema_drift():
-                    self.add_msg_fn("system", "⚠️ Schema drift detected, refreshing catalog...")
-                    self._refresh_catalog()
-                    self.render_chat_fn()
-                    return self.execute(user_question, depth=depth + 1)
-
-                # Don't raise error here - let Judge review and decide whether to revise or block
-                # Judge will see validation errors and can ask DS to fix table names, column names, etc.
-
             # Create Judge agent to review SQL against approved approach
             judge_agent = Agent(
                 "judge",
@@ -661,67 +613,33 @@ class ChatChain:
             current_sql = sql
 
             for review_turn in range(3):
-                # Validator Agent - check SQL syntax and schema for current SQL
-                validator_prompt = self.system_prompts.get("VALIDATOR", "")
-                validator_payload = {
-                    "sql": current_sql,
-                    "schema_info": self.catalog,
-                    "dialect": "duckdb"
-                }
-
-                # Call Validator Agent (convert payload to JSON string)
-                validation_response = self.llm_function(validator_prompt, json.dumps(validator_payload))
-
-                # Parse response (handle both dict and JSON string)
-                if isinstance(validation_response, str):
-                    try:
-                        validation = json.loads(validation_response)
-                    except json.JSONDecodeError:
-                        validation = {
-                            "ok": False,
-                            "errors": ["Failed to parse validation response"],
-                            "reasoning": validation_response[:200]
-                        }
-                else:
-                    validation = validation_response
-
-                # Display validation results (but don't block - let Judge decide)
-                if not validation.get("ok", False):
-                    errors = validation.get("errors", ["Unknown validation error"])
-                    error_msg = "\n".join([f"• {err}" for err in errors])
-                    self._display_agent_message("Validator", f"⚠️ Schema validation issues:\n{error_msg}")
-                    self.render_chat_fn()
-
-                # Judge reviews SQL with validation results
+                # Judge reviews SQL directly (no separate Validator)
                 judge_review = judge_agent.review_sql(
                     sql=current_sql,
                     approved_approach=approach,
                     dialogue_summary=dialogue_summary,
-                    validation_results=validation,  # Pass validation results to Judge
                     user_question=user_question
                 )
 
-                # Display Judge's verdict
+                # Display Judge's verdict (TERSE - just pass/fail)
                 verdict = judge_review.get("verdict", "approve")
-                reasoning = judge_review.get("reasoning", "")
                 issues = judge_review.get("issues", [])
 
                 if verdict == "approve":
-                    approval_msg = judge_review.get("approval_message", "SQL matches approved approach and is safe to execute.")
-                    self._display_agent_message("Judge", f"{reasoning}\n\n{approval_msg}")
+                    self._display_agent_message("Judge", "✅ Approved")
                     self.render_chat_fn()
                     sql = current_sql  # Use approved SQL
                     break  # Exit loop - approved
 
                 elif verdict == "block":
                     issues_text = "\n".join([f"• {issue}" for issue in issues])
-                    self._display_agent_message("Judge", f"❌ SQL blocked:\n{reasoning}\n\nIssues:\n{issues_text}")
+                    self._display_agent_message("Judge", f"❌ Blocked:\n{issues_text}")
                     self.render_chat_fn()
-                    raise ValueError(f"Judge blocked SQL: {reasoning}")
+                    raise ValueError(f"Judge blocked SQL: {issues_text}")
 
                 else:  # revise
                     issues_text = "\n".join([f"• {issue}" for issue in issues])
-                    self._display_agent_message("Judge", f"⚠️ Revision needed:\n{reasoning}\n\nIssues:\n{issues_text}")
+                    self._display_agent_message("Judge", f"⚠️ Revise:\n{issues_text}")
                     self.render_chat_fn()
 
                     # DS revises SQL based on Judge feedback
@@ -891,10 +809,6 @@ class ChatChain:
                     st.write(results)
 
                 self.render_chat_fn()
-
-            # Judge reviews results quality
-            self._display_agent_message("Judge", f"Results review: Query returned {len(results)} rows. Analysis complete.")
-            self.render_chat_fn()
 
             # Success!
             self.add_msg_fn("system", "✅ Analysis complete!")

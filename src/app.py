@@ -2080,29 +2080,16 @@ Choose based on analysis:
 
 ## STEP 7: DELEGATE TO DATA SCIENTIST
 
-Provide clear direction with VERBOSE REASONING in JSON format:
+Provide clear direction in CONCISE TODO-LIST FORMAT:
 
 {
-  "thinking_process": "DETAILED PLAIN LANGUAGE EXPLANATION:
-
-  The user is asking [describe request in detail].
-
-  Based on my analysis, the real business problem here is [explain deeper intent]. This suggests they want to [describe goal].
-
-  Looking at our data, we have [describe available data/tables]. This gives us [list relevant columns/features] that can help answer the question.
-
-  I'm classifying this as [analysis type] because [reasoning]. The goal is to [state clear objective].
-
-  The major milestones for this task are:
-  1. [Milestone 1] - [why important]
-  2. [Milestone 2] - [why important]
-  3. [Milestone 3] - [why important]
-
-  Key things to be mindful of:
-  - [Consideration 1 with detailed reasoning]
-  - [Consideration 2 with detailed reasoning]
-
-  I'm delegating to the DS team to handle the technical execution, with focus on [specific areas].",
+  "thinking_process": "**Analysis:** [User wants X] → Business goal: [Y]
+**Classification:** [Clustering/ML/EDA] using [available data]
+**Plan:**
+□ Milestone 1: [what]
+□ Milestone 2: [what]
+□ Milestone 3: [what]
+**Watch out:** [Key risks]",
 
   "am_strategic_direction": {
     "business_objective": "Clear objective statement",
@@ -2264,44 +2251,21 @@ You can execute test queries to verify:
 - Scaling: StandardScaler (normal dist), RobustScaler (outliers), MinMaxScaler (bounded)
 - Encoding: one-hot (low cardinality), label (ordinal), target (high cardinality)
 
-### TASK 3: EXPLAIN FULL PROCESS IN PLAIN LANGUAGE
+### TASK 3: CONFIRM FEASIBILITY (CONCISE)
 
-Provide a THOROUGH, VERBOSE explanation of your technical approach:
-
+**ROUND 1 - First Proposal:**
 {
-  "detailed_process_explanation": "FULL PLAIN LANGUAGE PROCESS:
+  "detailed_process_explanation": "**Feasibility:** [X rows, Y features] → Sufficient for [analysis type]
+**Technical Approach:** [Algorithm] with [method to determine parameters]
+**Addressing AM's Concerns:** [How each concern is handled]
+**Questions for AM:** [Only new questions not answered in cumulative_business_decisions]"
+}
 
-  Thank you AM for the strategic direction. Let me validate and refine the technical approach.
-
-  **Confirming AM's Key Points:**
-  - I see you want [restate AM objective]
-  - You've asked me to [list AM's delegated tasks]
-  - You've flagged [list AM's key considerations] - I'll address each below
-
-  **Feasibility Check:**
-  I've validated that [describe what you checked]. Based on schema analysis, we have [row count] rows with [list key columns]. This is [sufficient/insufficient] for [analysis type].
-
-  **My Proposed Technical Approach:**
-
-  For clustering analysis where user didn't specify number of clusters:
-  - I recommend starting with ELBOW METHOD to determine optimal k
-  - We'll test k=2 through k=10 and plot inertia
-  - Then select k where curve shows diminishing returns
-  - Alternatively, use silhouette score to validate
-
-  The full step-by-step process will be:
-  1. [Step 1 in plain language] - [why this matters]
-  2. [Step 2 in plain language] - [why this matters]
-  3. [Step 3 in plain language] - [why this matters]
-  4. [Step 4 in plain language] - [why this matters]
-
-  **Addressing AM's Considerations:**
-  - [Consideration 1]: My approach is [how you handle it]
-  - [Consideration 2]: My approach is [how you handle it]
-
-  **Questions I Need AM to Decide:**
-  - [Business question 1]
-  - [Business question 2]"
+**ROUND 2 - Revision (ONLY address AM's feedback):**
+{
+  "detailed_process_explanation": "**Changes Made:**
+- [Feedback item 1]: [What I changed]
+- [Feedback item 2]: [What I changed]"
 }
 
 ### TASK 4: PROPOSE IMPLEMENTATION DETAILS
@@ -2470,21 +2434,20 @@ IMPORTANT: Check if this is a revision (AM sent feedback). If so, add:
 ## OUTPUT REQUIREMENTS
 
 You MUST return a JSON object with these REQUIRED fields:
-1. "am_decisions_acknowledged" - Dict acknowledging EACH decision in cumulative_business_decisions (MANDATORY)
+1. "am_decisions_acknowledged" - Dict acknowledging EACH decision in cumulative_business_decisions (MANDATORY, but CONCISE)
 2. "revision_mode" - true if previous_ds_response exists, false for first proposal
-3. "addressing_feedback" - If revision_mode=true, list how you addressed each item in last_am_feedback
-4. "detailed_process_explanation" - VERBOSE plain language explanation (minimum 8 sentences) explaining:
-   - What AM asked for
-   - Acknowledgment: "I see AM decided X in cumulative_business_decisions"
-   - Your feasibility check results
-   - Your proposed technical approach step-by-step
-   - How you address AM's considerations
-   - Questions you need AM to decide (ONLY if not already in cumulative_business_decisions!)
+3. "addressing_feedback" - If revision_mode=true, ONLY list changes made (not entire plan)
+4. "detailed_process_explanation" - CONCISE confirmation:
+   - Round 1: "Feasibility: [X]  Approach: [Y]  Concerns addressed: [Z]"
+   - Round 2: "Changes made: [only what changed based on AM feedback]"
 5. "ds_technical_review" - Technical specs and implementation details
 6. "refined_approach" - Phases breakdown
 7. "questions_for_am" - Business questions NOT already answered (check cumulative_business_decisions first!)
 
-CRITICAL: If cumulative_business_decisions contains answer to your question, DON'T ask it again - use the decision!
+CRITICAL:
+- Be CONCISE - no long explanations
+- Round 2: ONLY talk about what changed, don't repeat everything
+- If cumulative_business_decisions contains answer, DON'T ask again!
 
 Return ONLY a single JSON object with ALL required fields.
 """
@@ -2597,20 +2560,11 @@ You must answer: {"n_clusters_approach": "Use elbow method first, then select op
 {
   "am_review_decision": "approve|revise|clarify",
 
-  "decision_reasoning": "VERBOSE EXPLANATION:
-
-  This is round [1|2|3]. In the previous round, I asked DS to [what you asked].
-
-  Looking at DS's response:
-  - [Point 1]: DS addressed this by [how they addressed it] → ✅ Satisfied
-  - [Point 2]: DS addressed this by [how they addressed it] → ✅ Satisfied
-  - [Point 3]: DS did not address [specific issue] → ⚠️ Still needs work
-
-  DS asked me these business questions:
-  - [Question 1]: My decision is [answer with reasoning]
-  - [Question 2]: My decision is [answer with reasoning]
-
-  Based on this analysis, my decision is [APPROVE/REVISE] because [clear reasoning].",
+  "decision_reasoning": "**Round [1|2]:**
+[If Round 1] DS proposes [approach]. Issues: [only list problems, not satisfied items]
+[If Round 2] Previous feedback: [what you asked]. DS response: [what changed or didn't change]
+**My answers to DS questions:** [question] → [answer]
+**Decision:** [APPROVE/REVISE] because [reason]",
 
   "alignment_check": {
     "business_objective": "✅ DS plan will achieve segment identification",
@@ -2659,11 +2613,10 @@ You must answer: {"n_clusters_approach": "Use elbow method first, then select op
 
 You MUST return a JSON object with these REQUIRED fields:
 1. "am_review_decision" - Must be "approve", "revise", or "clarify"
-2. "decision_reasoning" - VERBOSE explanation (minimum 6 sentences) explaining:
-   - What round this is (1 or 2)
-   - What you asked DS to do in previous round (if round 2)
-   - How DS responded to each point
-   - Your answers to DS's questions
+2. "decision_reasoning" - CONCISE explanation (3-5 sentences MAX):
+   - Round 1: Only list PROBLEMS/MISSING items (don't praise satisfied items)
+   - Round 2: Only comment on what's STILL UNRESOLVED (don't repeat satisfied items)
+   - Your answers to DS's questions (if any)
    - Why you decided to approve/revise/clarify
 3. "changes_detected" - REQUIRED if round 2 (check dialogue_history):
    {
@@ -2675,7 +2628,9 @@ You MUST return a JSON object with these REQUIRED fields:
      "still_unaddressed": []  // Empty if all feedback addressed
    }
 4. "alignment_check" - Detailed alignment validation
-5. "feedback_to_ds" - Specific actionable feedback
+5. "feedback_to_ds" - ONLY items that need fixing (NO praise, NO satisfied items)
+   - Round 1: [Only problems: "Missing X", "Need to add Y"]
+   - Round 2: [Only unresolved: "Still missing X"]
 6. "business_decisions" - Your answers to ALL questions DS asked (REQUIRED if DS asked questions!)
 
 CRITICAL VALIDATION RULES:
