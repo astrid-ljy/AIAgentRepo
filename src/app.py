@@ -2104,10 +2104,10 @@ Choose based on analysis:
 
 ## STEP 7: DELEGATE TO DATA SCIENTIST
 
-Provide clear direction in CONCISE FORMAT:
+Provide clear direction in CONVERSATIONAL FORMAT:
 
 {
-  "thinking_process": "User wants [X] → Goal: [Y] | Type: [Clustering/ML/EDA] | Steps: □ [1] □ [2] □ [3] | Risks: [key concern]",
+  "thinking_process": "I think the user is asking for [what they want in plain English]. The business goal here is [why this matters]. This is a [clustering/ML/EDA] task. My plan: [step 1], [step 2], [step 3]. One thing to watch out for: [main concern].",
 
   "am_strategic_direction": {
     "business_objective": "Clear objective statement",
@@ -2269,11 +2269,11 @@ You can execute test queries to verify:
 - Scaling: StandardScaler (normal dist), RobustScaler (outliers), MinMaxScaler (bounded)
 - Encoding: one-hot (low cardinality), label (ordinal), target (high cardinality)
 
-### TASK 3: CONFIRM FEASIBILITY (CONCISE)
+### TASK 3: CONFIRM FEASIBILITY (CONVERSATIONAL)
 
 **ROUND 1 - First Proposal:**
 {
-  "detailed_process_explanation": "Feasibility: [X rows, Y features OK] | Approach: [Algorithm + parameter method] | Concerns addressed: [how]",
+  "detailed_process_explanation": "Good news! We have [X] rows and [Y] features, which should work well. I'm thinking we use [Algorithm] with [method for parameters]. I've addressed the concerns about [how you handled them].",
   "todo_list": {
     "completed": ["✅ Validate schema", "✅ Check data sufficiency"],
     "in_progress": ["⏳ Select algorithm"],
@@ -2283,7 +2283,7 @@ You can execute test queries to verify:
 
 **ROUND 2 - Revision (ONLY address AM's feedback):**
 {
-  "detailed_process_explanation": "Changes: [Feedback 1] → [action] | [Feedback 2] → [action]",
+  "detailed_process_explanation": "You're right about [Feedback 1] - I've [action taken]. Also updated [Feedback 2] by [action taken].",
   "todo_list": {
     "completed": ["✅ Validate schema", "✅ Check data sufficiency", "✅ Add marketing recs (per AM)"],
     "in_progress": ["⏳ Update Phase 4 with recommendations"],
@@ -2589,11 +2589,7 @@ You must answer: {"n_clusters_approach": "Use elbow method first, then select op
 {
   "am_review_decision": "approve|revise|clarify",
 
-  "decision_reasoning": "**Round [1|2]:**
-[If Round 1] DS proposes [approach]. Issues: [only list problems, not satisfied items]
-[If Round 2] Previous feedback: [what you asked]. DS response: [what changed or didn't change]
-**My answers to DS questions:** [question] → [answer]
-**Decision:** [APPROVE/REVISE] because [reason]",
+  "decision_reasoning": "Looking at DS's plan, [brief assessment]. [If Round 2: They addressed [what was fixed], though [any remaining issues]]. For the questions they asked: [answer each naturally]. I'm going to [APPROVE/REVISE] because [conversational reason].",
 
   "alignment_check": {
     "business_objective": "✅ DS plan will achieve segment identification",
@@ -2606,10 +2602,9 @@ You must answer: {"n_clusters_approach": "Use elbow method first, then select op
   },
 
   "feedback_to_ds": [
-    "✅ Excellent technical refinement - correlation analysis is data-driven",
-    "✅ Good catch on class imbalance - not critical for clustering but good awareness",
-    "⚠️ Please add marketing recommendations to Phase 4 deliverables",
-    "❌ Skip cluster stability analysis - adds complexity without business value"
+    "[Only list actual problems/changes needed, not praise]",
+    "⚠️ [What needs to be fixed or added]",
+    "[Skip if everything looks good]"
   ],
 
   "business_decisions": {
