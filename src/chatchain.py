@@ -197,40 +197,38 @@ class ChatChain:
                     self.render_chat_fn()
                     am_direction = am_director_agent.propose_approach(user_question)
 
-                    # Display AM's thinking process (verbose reasoning)
-                    if am_direction.get("thinking_process"):
-                        self._display_agent_message("AM", "**Strategic Analysis:**")
-                        thinking = am_direction["thinking_process"]
-                        # Split by paragraphs and display
-                        for paragraph in thinking.split("\n\n"):
-                            if paragraph.strip():
-                                self.add_msg_fn("assistant", paragraph.strip())
+                    # BUILD COMPLETE AM MESSAGE IN ONE BLOCK
+                    am_message_parts = []
 
-                    # Display AM's strategic direction
+                    # Add strategic analysis
+                    if am_direction.get("thinking_process"):
+                        am_message_parts.append("**Strategic Analysis:**\n" + am_direction["thinking_process"])
+
+                    # Add strategic direction
                     if am_direction.get("am_strategic_direction"):
                         direction = am_direction["am_strategic_direction"]
-                        self.add_msg_fn("assistant", f"\n**Business Objective:** {direction.get('business_objective', '')}")
+                        am_message_parts.append(f"\n**Business Objective:** {direction.get('business_objective', '')}")
 
-                        # Display delegated tasks
+                        # Add delegated tasks
                         if direction.get("delegated_tasks"):
                             tasks = direction["delegated_tasks"]
-                            self.add_msg_fn("assistant", "\n**📋 Tasks for DS:**")
-                            for task in tasks.get("for_data_scientist", []):
-                                self.add_msg_fn("assistant", f"  - {task}")
+                            task_list = "\n".join([f"  - {task}" for task in tasks.get("for_data_scientist", [])])
+                            am_message_parts.append(f"\n**📋 Tasks for DS:**\n{task_list}")
 
-                            # Display key considerations
+                            # Add key considerations
                             if tasks.get("key_considerations"):
-                                self.add_msg_fn("assistant", "\n**⚠️ Key Considerations:**")
-                                for consideration in tasks["key_considerations"]:
-                                    self.add_msg_fn("assistant", f"  {consideration}")
+                                considerations = "\n".join([f"  {c}" for c in tasks["key_considerations"]])
+                                am_message_parts.append(f"\n**⚠️ Key Considerations:**\n{considerations}")
 
-                        # Display extracted parameters (only show non-null values)
+                        # Add extracted parameters
                         if direction.get("extracted_parameters"):
                             params = direction["extracted_parameters"]
                             non_null_params = {k: v for k, v in params.items() if v is not None}
                             if non_null_params:
-                                self.add_msg_fn("assistant", f"\n**🎯 Extracted Parameters:** {non_null_params}")
+                                am_message_parts.append(f"\n**🎯 Extracted Parameters:** {non_null_params}")
 
+                    # Display everything as ONE message
+                    self._display_agent_message("AM", "\n".join(am_message_parts))
                     dialogue_history.append({"turn": turn + 1, "role": "am", "action": "direct", "content": am_direction})
                     self.render_chat_fn()
 
@@ -244,65 +242,59 @@ class ChatChain:
                     execute_fn=self.execute_readonly_fn
                 )
 
-                # Display DS's acknowledgment of AM decisions
+                # BUILD COMPLETE DS MESSAGE IN ONE BLOCK
+                ds_message_parts = []
+
+                # Add acknowledgment of AM decisions
                 if ds_review.get("am_decisions_acknowledged"):
-                    self._display_agent_message("DS", "**Acknowledging AM's Decisions:**")
-                    for key, ack in ds_review["am_decisions_acknowledged"].items():
-                        self.add_msg_fn("assistant", f"  - **{key}:** {ack}")
+                    ack_list = "\n".join([f"  - **{key}:** {ack}" for key, ack in ds_review["am_decisions_acknowledged"].items()])
+                    ds_message_parts.append(f"**Acknowledging AM's Decisions:**\n{ack_list}")
 
-                # Display revision mode and addressing feedback
+                # Add revision mode info
                 if ds_review.get("revision_mode"):
-                    self.add_msg_fn("assistant", "\n**🔄 Revision Mode:** Addressing AM's feedback")
+                    ds_message_parts.append("\n**🔄 Revision Mode:** Addressing AM's feedback")
                     if ds_review.get("addressing_feedback"):
-                        self.add_msg_fn("assistant", "**Changes Made:**")
-                        for change in ds_review["addressing_feedback"]:
-                            self.add_msg_fn("assistant", f"  - {change}")
+                        changes = "\n".join([f"  - {change}" for change in ds_review["addressing_feedback"]])
+                        ds_message_parts.append(f"\n**Changes Made:**\n{changes}")
 
-                # Display DS's detailed process explanation
+                # Add detailed process explanation
                 if ds_review.get("detailed_process_explanation"):
-                    self.add_msg_fn("assistant", "\n**Technical Response:**")
-                    explanation = ds_review["detailed_process_explanation"]
-                    # Split by paragraphs
-                    for paragraph in explanation.split("\n\n"):
-                        if paragraph.strip():
-                            self.add_msg_fn("assistant", paragraph.strip())
+                    ds_message_parts.append(f"\n**Technical Response:**\n{ds_review['detailed_process_explanation']}")
 
-                # Display DS's TODO list
+                # Add TODO list
                 if ds_review.get("todo_list"):
                     todo = ds_review["todo_list"]
-                    self.add_msg_fn("assistant", "\n**📋 DS TODO List:**")
+                    todo_items = []
                     if todo.get("completed"):
-                        for item in todo["completed"]:
-                            self.add_msg_fn("assistant", f"  {item}")
+                        todo_items.extend(todo["completed"])
                     if todo.get("in_progress"):
-                        for item in todo["in_progress"]:
-                            self.add_msg_fn("assistant", f"  {item}")
+                        todo_items.extend(todo["in_progress"])
                     if todo.get("pending"):
-                        for item in todo["pending"]:
-                            self.add_msg_fn("assistant", f"  {item}")
+                        todo_items.extend(todo["pending"])
+                    if todo_items:
+                        todo_str = "\n".join([f"  {item}" for item in todo_items])
+                        ds_message_parts.append(f"\n**📋 DS TODO List:**\n{todo_str}")
 
-                # Display DS's technical review summary
+                # Add technical review summary
                 if ds_review.get("ds_technical_review"):
                     review = ds_review["ds_technical_review"]
-
-                    # Show feasibility validation
                     if review.get("feasibility_validation"):
                         validation = review["feasibility_validation"]
-                        self.add_msg_fn("assistant", f"\n**Schema Check:** {validation.get('schema_check', '')}")
-                        self.add_msg_fn("assistant", f"**Data Sufficiency:** {validation.get('data_sufficiency', '')}")
+                        ds_message_parts.append(f"\n**Schema Check:** {validation.get('schema_check', '')}")
+                        ds_message_parts.append(f"**Data Sufficiency:** {validation.get('data_sufficiency', '')}")
 
-                    # Show identified risks
                     if review.get("identified_risks"):
-                        self.add_msg_fn("assistant", "\n**⚠️ Identified Risks:**")
-                        for risk in review["identified_risks"][:3]:
-                            self.add_msg_fn("assistant", f"  - {risk.get('risk', '')}: {risk.get('mitigation', '')}")
+                        risks = "\n".join([f"  - {risk.get('risk', '')}: {risk.get('mitigation', '')}"
+                                          for risk in review["identified_risks"][:3]])
+                        ds_message_parts.append(f"\n**⚠️ Identified Risks:**\n{risks}")
 
-                    # Show questions for AM
-                    if ds_review.get("questions_for_am"):
-                        self.add_msg_fn("assistant", "\n**❓ Questions for AM:**")
-                        for question in ds_review["questions_for_am"]:
-                            self.add_msg_fn("assistant", f"  - {question}")
+                # Add questions for AM
+                if ds_review.get("questions_for_am"):
+                    questions = "\n".join([f"  - {q}" for q in ds_review["questions_for_am"]])
+                    ds_message_parts.append(f"\n**❓ Questions for AM:**\n{questions}")
 
+                # Display everything as ONE message
+                self._display_agent_message("DS", "\n".join(ds_message_parts))
                 dialogue_history.append({"turn": turn + 1, "role": "ds", "action": "review", "content": ds_review})
                 self.render_chat_fn()
 
@@ -311,48 +303,43 @@ class ChatChain:
                 self.render_chat_fn()
                 am_review = am_reviewer_agent.critique_approach(ds_review, user_question, dialogue_history)
 
-                # Display AM's decision reasoning (verbose)
-                if am_review.get("decision_reasoning"):
-                    self._display_agent_message("AM", "**Review Analysis:**")
-                    reasoning = am_review["decision_reasoning"]
-                    # Split by paragraphs
-                    for paragraph in reasoning.split("\n\n"):
-                        if paragraph.strip():
-                            self.add_msg_fn("assistant", paragraph.strip())
+                # BUILD COMPLETE AM REVIEW MESSAGE IN ONE BLOCK
+                am_review_parts = []
 
-                # Display AM's review decision
+                # Add decision reasoning
+                if am_review.get("decision_reasoning"):
+                    am_review_parts.append(f"**Review Analysis:**\n{am_review['decision_reasoning']}")
+
+                # Add review decision
                 if am_review.get("am_review_decision"):
                     decision = am_review["am_review_decision"]
-                    self.add_msg_fn("assistant", f"\n**Decision: {decision.upper()}**")
+                    am_review_parts.append(f"\n**Decision: {decision.upper()}**")
 
-                    # Show changes detected (Round 2 validation)
+                    # Add changes detected (Round 2 validation)
                     if am_review.get("changes_detected"):
                         changes = am_review["changes_detected"]
                         if changes.get("ds_made_changes"):
-                            self.add_msg_fn("assistant", "\n**✅ Changes Detected:**")
-                            for change in changes.get("specific_changes", []):
-                                self.add_msg_fn("assistant", f"  - {change}")
+                            change_list = "\n".join([f"  - {change}" for change in changes.get("specific_changes", [])])
+                            am_review_parts.append(f"\n**✅ Changes Detected:**\n{change_list}")
                             if changes.get("still_unaddressed"):
-                                self.add_msg_fn("assistant", "\n**⚠️ Still Unaddressed:**")
-                                for issue in changes["still_unaddressed"]:
-                                    self.add_msg_fn("assistant", f"  - {issue}")
+                                unaddressed = "\n".join([f"  - {issue}" for issue in changes["still_unaddressed"]])
+                                am_review_parts.append(f"\n**⚠️ Still Unaddressed:**\n{unaddressed}")
                         else:
-                            self.add_msg_fn("assistant", "\n**❌ No Changes Detected:** DS response identical to Round 1")
+                            am_review_parts.append("\n**❌ No Changes Detected:** DS response identical to Round 1")
 
-                    # Show feedback
+                    # Add feedback
                     if am_review.get("feedback_to_ds"):
-                        self.add_msg_fn("assistant", "\n**Feedback:**")
-                        for feedback in am_review["feedback_to_ds"][:5]:
-                            self.add_msg_fn("assistant", f"  {feedback}")
+                        feedback_list = "\n".join([f"  {feedback}" for feedback in am_review["feedback_to_ds"][:5]])
+                        am_review_parts.append(f"\n**Feedback:**\n{feedback_list}")
 
-                    # Show business decisions (answers to DS questions)
+                    # Add business decisions
                     if am_review.get("business_decisions"):
-                        self.add_msg_fn("assistant", "\n**Business Decisions:**")
-                        for key, value in am_review["business_decisions"].items():
-                            # Format key nicely (snake_case to Title Case)
-                            formatted_key = key.replace("_", " ").title()
-                            self.add_msg_fn("assistant", f"  - **{formatted_key}:** {value}")
+                        decisions = "\n".join([f"  - **{key.replace('_', ' ').title()}:** {value}"
+                                              for key, value in am_review["business_decisions"].items()])
+                        am_review_parts.append(f"\n**Business Decisions:**\n{decisions}")
 
+                # Display everything as ONE message
+                self._display_agent_message("AM", "\n".join(am_review_parts))
                 dialogue_history.append({"turn": turn + 1, "role": "am", "action": "review", "content": am_review})
                 self.render_chat_fn()
 
@@ -447,7 +434,11 @@ class ChatChain:
                     approach["workflow_type"] = "multi_phase"
 
                     # Try to extract phases from key_steps if they mention phases
-                    if not approach.get("phases"):
+                    # CRITICAL: Override if phases is missing OR if it's clustering without proper 5-phase structure
+                    existing_phases = approach.get("phases", [])
+                    needs_clustering_phases = is_clustering and (not existing_phases or len(existing_phases) < 5)
+
+                    if not existing_phases or needs_clustering_phases:
                         if is_clustering:
                             # Clustering/Segmentation phases - Unsupervised learning workflow (5 phases)
                             # Phase 1: Retrieve ALL raw data (no target variable for unsupervised!)
