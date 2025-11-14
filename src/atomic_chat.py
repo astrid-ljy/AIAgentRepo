@@ -720,7 +720,7 @@ class Agent:
         return response
 
     def review_sql(self, sql: str, approved_approach: Dict,
-                  dialogue_summary: str, validation_results: Dict, user_question: str = None) -> Dict:
+                  dialogue_summary: str, validation_results: Dict = None, user_question: str = None) -> Dict:
         """
         Judge: Review SQL against approved approach (Phase 3)
 
@@ -728,7 +728,7 @@ class Agent:
             sql: The SQL query to review
             approved_approach: The plain language plan from Phase 1
             dialogue_summary: Summary of Phase 1 discussion
-            validation_results: Schema validation results
+            validation_results: Schema validation results (optional - Judge validates if not provided)
             user_question: Original user question (for context)
 
         Returns:
