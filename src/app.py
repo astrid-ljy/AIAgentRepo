@@ -2160,7 +2160,13 @@ extracted_parameters: {
 5. Use memory - check context before planning
 6. Extract intent - understand what user REALLY wants
 
-Return ONLY a single JSON object.
+## OUTPUT REQUIREMENTS
+
+You MUST return a JSON object with these REQUIRED fields:
+1. "thinking_process" - VERBOSE plain language explanation (minimum 5 sentences)
+2. "am_strategic_direction" - Your strategic direction and delegated tasks
+
+Return ONLY a single JSON object with BOTH fields.
 """
 
 SYSTEM_DS_TECHNICAL_ADVISOR = """
@@ -2182,6 +2188,19 @@ Your job: validate feasibility and refine the execution plan.
     "extracted_parameters": {...}
   }
 }
+
+## DIALOGUE_HISTORY (CHECK FOR PREVIOUS ANSWERS!)
+
+If dialogue_history is provided, CHECK IT FIRST:
+- Look for AM's previous "business_decisions" field
+- AM may have already answered your questions!
+- Example: If you asked "Should we use elbow method?" in round 1, AM may have answered in business_decisions: {"n_clusters_approach": "Use elbow method"}
+- DO NOT ask the same question twice! Use AM's answer instead.
+
+If this is round 2+ (revision):
+- Check what AM asked you to fix in "feedback_to_ds"
+- Address ONLY those specific points
+- Confirm you addressed each point in "addressing_feedback"
 
 ## YOUR TASKS
 
@@ -2426,7 +2445,21 @@ IMPORTANT: Check if this is a revision (AM sent feedback). If so, add:
 5. Be specific - provide exact approaches
 6. Think performance - consider speed, memory
 
-Return ONLY a single JSON object.
+## OUTPUT REQUIREMENTS
+
+You MUST return a JSON object with these REQUIRED fields:
+1. "revision_mode" - true if responding to AM feedback, false for first proposal
+2. "detailed_process_explanation" - VERBOSE plain language explanation (minimum 8 sentences) explaining:
+   - What AM asked for
+   - Your feasibility check results
+   - Your proposed technical approach step-by-step
+   - How you address AM's considerations
+   - Questions you need AM to decide
+3. "ds_technical_review" - Technical specs and implementation details
+4. "refined_approach" - Phases breakdown
+5. "questions_for_am" - Business questions (check dialogue_history first! Don't repeat!)
+
+Return ONLY a single JSON object with ALL required fields.
 """
 
 SYSTEM_AM_FINAL_REVIEW = """
@@ -2595,7 +2628,23 @@ You must answer: {"n_clusters_approach": "Use elbow method first, then select op
 ## IF CLARIFICATION NEEDED:
 - Ask user directly for business decision (use this sparingly)
 
-Return ONLY a single JSON object.
+## OUTPUT REQUIREMENTS
+
+You MUST return a JSON object with these REQUIRED fields:
+1. "am_review_decision" - Must be "approve", "revise", or "clarify"
+2. "decision_reasoning" - VERBOSE explanation (minimum 6 sentences) explaining:
+   - What round this is (1 or 2)
+   - What you asked DS to do in previous round (if round 2)
+   - How DS responded to each point
+   - Your answers to DS's questions
+   - Why you decided to approve/revise/clarify
+3. "alignment_check" - Detailed alignment validation
+4. "feedback_to_ds" - Specific actionable feedback
+5. "business_decisions" - Your answers to ALL questions DS asked (REQUIRED if DS asked questions!)
+
+CRITICAL: If DS asked "questions_for_am", you MUST answer them in "business_decisions"!
+
+Return ONLY a single JSON object with ALL required fields.
 """
 
 # ===== END AM-LED WORKFLOW PROMPTS =====
