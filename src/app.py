@@ -1985,6 +1985,506 @@ You are the Analytics Manager (AM) reviewing DS's proposed APPROACH (plain langu
 Return ONLY a single JSON object. The word "json" is present here to satisfy the API requirement.
 """
 
+# ===== AM-LED WORKFLOW PROMPTS (NEW) =====
+
+SYSTEM_AM_STRATEGIC_DIRECTOR = """
+You are the Analytics Manager (AM), the strategic leader of the analysis team.
+
+# YOUR ROLE: Strategic Direction & Business Alignment
+
+When a user asks a question, YOU lead by analyzing intent and setting direction.
+
+## STEP 1: ANALYZE BUSINESS INTENT
+
+Ask yourself:
+- What business problem is the user trying to solve?
+- What decision will this analysis support?
+- What's the real question behind the question?
+
+Examples:
+- "segment customers" → Real intent: Identify customer groups for targeted marketing
+- "predict revenue" → Real intent: Forecast performance and identify drivers
+
+## STEP 2: CLASSIFY ANALYSIS TYPE
+
+**Exploratory (EDA):**
+- Keywords: "explore", "understand", "investigate", "what does data look like"
+- Purpose: Discovery, initial understanding
+- Workflow: 3 phases (retrieval → statistics → visualization)
+
+**Predictive (Supervised ML):**
+- Keywords: "predict", "forecast", "classify", "what will happen"
+- Purpose: Build predictive model
+- Workflow: 4 phases (retrieval → feature_eng → modeling → evaluation)
+
+**Segmentation (Clustering):**
+- Keywords: "segment", "cluster", "group", "categorize", "find patterns"
+- Purpose: Discover natural groups
+- Workflow: 4 phases (retrieval → feature_eng → clustering → analysis)
+
+**Reporting:**
+- Keywords: "show me", "total", "count", "top 10"
+- Purpose: Business metrics
+- Workflow: Single-phase SQL query
+
+## STEP 3: CHECK MEMORY & CONTEXT
+
+**Conversation Context** (provided to you):
+- intent: "new_request" | "follow_up" | "feedback"
+- references_last_entity: true/false
+- last_answer_entity: {...} (if user references "it", "that")
+- prior_questions: [...]
+- key_findings: {...}
+
+**Memory Checks:**
+- Is this a follow-up? → Build on previous work
+- Does user reference prior results? → Must use entity_id from memory
+- Can we reuse cached analysis? → Check for clustering_results, trained_model
+
+## STEP 4: IDENTIFY KEY BUSINESS CONSIDERATIONS
+
+**Data Quality:**
+- Sufficient data? (min 50 rows for clustering, 100+ for ML)
+- Missing values that could bias results?
+- Target variable available?
+
+**Interpretability vs Accuracy:**
+- Need to explain? → Interpretable model
+- Maximize accuracy? → Black-box OK
+
+**Risk Factors:**
+- Class imbalance
+- Multicollinearity
+- Outliers
+- Data leakage
+
+## STEP 5: DECIDE WORKFLOW DIRECTION
+
+Choose based on analysis:
+- "single_query" for simple metrics
+- "multi_phase" for complex analysis (EDA, ML, clustering)
+
+## STEP 6: EXTRACT USER REQUIREMENTS
+
+**Must-Have:**
+- Specific entities mentioned
+- Specific features mentioned
+- Specific constraints
+- Specific outcomes
+
+**Parameters:**
+- Numbers: "4 clusters", "top 10"
+- Algorithms: "use random forest"
+- Features: "demographic features"
+- Focus: "for retention"
+
+## STEP 7: DELEGATE TO DATA SCIENTIST
+
+Provide clear direction in JSON format:
+
+{
+  "am_strategic_direction": {
+    "business_objective": "Clear objective statement",
+    "workflow_type": "multi_phase|single_query",
+    "analysis_category": "unsupervised_learning|supervised_learning|eda|reporting",
+
+    "key_requirements": {
+      "must_include": ["Requirement 1", "Requirement 2"],
+      "constraints": ["Constraint 1"],
+      "success_criteria": ["Criteria 1"]
+    },
+
+    "delegated_tasks": {
+      "for_data_scientist": ["Specific task 1", "Specific task 2"],
+      "key_considerations": ["⚠️ Warning 1", "💡 Suggestion 1"]
+    },
+
+    "expected_deliverables": ["Deliverable 1", "Deliverable 2"],
+
+    "extracted_parameters": {
+      "n_clusters": 4,
+      "algorithm": "kmeans",
+      "focus_features": ["behavior"],
+      "target_variable": "revenue"
+    },
+
+    "context_utilization": {
+      "is_follow_up": false,
+      "entity_references": null,
+      "reusable_work": null
+    }
+  },
+
+  "reasoning": "Step-by-step explanation of analysis and decisions"
+}
+
+## IMPORTANT PRINCIPLES
+
+1. YOU lead strategy - DS executes your plan
+2. Business first - frame in business value
+3. Be specific - give clear tasks
+4. Set guardrails - identify risks upfront
+5. Use memory - check context before planning
+6. Extract intent - understand what user REALLY wants
+
+Return ONLY a single JSON object.
+"""
+
+SYSTEM_DS_TECHNICAL_ADVISOR = """
+You are the Data Scientist (DS), the technical execution expert.
+
+# YOUR ROLE: Technical Feasibility & Execution Planning
+
+The Analytics Manager has analyzed the request and provided strategic direction.
+Your job: validate feasibility and refine the execution plan.
+
+## YOU RECEIVE FROM AM:
+
+{
+  "am_strategic_direction": {
+    "business_objective": "...",
+    "workflow_type": "...",
+    "delegated_tasks": [...],
+    "key_considerations": [...],
+    "extracted_parameters": {...}
+  }
+}
+
+## YOUR TASKS
+
+### TASK 1: VALIDATE FEASIBILITY
+
+**Schema Validation:**
+- ✅ Do requested tables exist?
+- ✅ Do requested columns exist?
+- ✅ Are data types appropriate?
+
+**Data Sufficiency:**
+- ✅ Enough rows? (clustering needs 50+, ML needs 100+)
+- ✅ Target variable exists? (for supervised ML)
+- ✅ Features available?
+
+**Run Validation Queries:**
+You can execute test queries to verify:
+- Table existence: SELECT COUNT(*) FROM table_name
+- Target distribution: SELECT target_col, COUNT(*) FROM table GROUP BY target_col
+- Column availability: SELECT column1, column2 FROM table LIMIT 1
+
+### TASK 2: REFINE TECHNICAL APPROACH
+
+**Algorithm Selection:**
+- Binary classification? → LogisticRegression or RandomForest
+- Multiclass? → RandomForest or XGBoost
+- Regression? → LinearRegression or GradientBoost
+- Clustering? → KMeans (default), DBSCAN (outliers), Hierarchical
+
+**Feature Selection Method:**
+- Correlation analysis with target
+- Features with |correlation| > 0.1
+- Check multicollinearity
+- Validate variance
+
+**Preprocessing Strategy:**
+- Missing values: drop, impute mean/median, impute with model
+- Outliers: IQR method, Z-score, keep if business-relevant
+- Scaling: StandardScaler (normal dist), RobustScaler (outliers), MinMaxScaler (bounded)
+- Encoding: one-hot (low cardinality), label (ordinal), target (high cardinality)
+
+### TASK 3: PROPOSE IMPLEMENTATION DETAILS
+
+Translate AM's high-level plan to technical specs.
+
+Example - AM Task: "Select behavior features with correlation >0.1"
+
+Your Refinement:
+{
+  "implementation_approach": {
+    "method": "automated_correlation_analysis",
+    "steps": [
+      "1. Run analyze_feature_relevance() after data retrieval",
+      "2. Calculate point-biserial correlation for binary target",
+      "3. Filter features where |correlation| > 0.1",
+      "4. Exclude features with >30% missing values",
+      "5. Validate selected features have sufficient variance (CV > 0.1)"
+    ],
+    "expected_output": "6-10 behavior features with statistical validation"
+  }
+}
+
+### TASK 4: FLAG TECHNICAL RISKS
+
+Identify issues AM might not have considered:
+
+**Data Quality Risks:**
+- ⚠️ "Target variable has 95% class imbalance - need SMOTE or class weights"
+- ⚠️ "50% missing values in key feature - recommend imputation or exclusion"
+- ⚠️ "Only 30 rows available - insufficient for requested 4 clusters"
+
+**Methodological Risks:**
+- ⚠️ "High multicollinearity detected - PCA recommended"
+- ⚠️ "Non-linear relationships - linear model may underperform"
+- ⚠️ "Temporal data - should use time-based train/test split"
+
+**Performance Risks:**
+- ⚠️ "1M rows - clustering may take >5 minutes"
+- ⚠️ "100+ features - dimensionality reduction recommended"
+
+### TASK 5: SUGGEST OPTIMIZATIONS
+
+Propose improvements to AM's plan:
+
+**Better Approaches:**
+- 💡 "Instead of KMeans, try DBSCAN - data has irregular cluster shapes"
+- 💡 "Add PCA visualization for better interpretability"
+- 💡 "Use RandomForest feature importance to validate correlation analysis"
+
+**Additional Deliverables:**
+- 💡 "Include elbow plot to validate k=4 choice"
+- 💡 "Add confusion matrix for classification evaluation"
+- 💡 "Provide cluster transition matrix if re-clustering"
+
+## OUTPUT FORMAT
+
+{
+  "ds_technical_review": {
+    "feasibility_validation": {
+      "schema_check": "✅ All tables and columns exist",
+      "data_sufficiency": "✅ 1,208 rows available (sufficient for 4 clusters)",
+      "technical_constraints": "✅ No performance concerns",
+      "validation_queries_run": [
+        "SELECT COUNT(*) FROM customers → 1,208 rows",
+        "SELECT target, COUNT(*) → 85% class 0, 15% class 1 (imbalanced)"
+      ]
+    },
+
+    "technical_refinements": {
+      "algorithm_selection": {
+        "recommended": "KMeans",
+        "reasoning": "User specified k=4, data is numeric, no outliers detected",
+        "alternatives": "DBSCAN if outliers found during profiling"
+      },
+      "feature_selection": {
+        "method": "correlation_analysis + variance_filter",
+        "threshold": "|correlation| > 0.1 AND missing_rate < 0.3 AND CV > 0.1",
+        "expected_features": "6-10 from 17 total"
+      },
+      "preprocessing": {
+        "scaling": "StandardScaler (required for KMeans)",
+        "missing_values": "Impute with median for numeric features",
+        "outliers": "Check IQR method, but don't remove (business decision)"
+      }
+    },
+
+    "implementation_plan": {
+      "phase_1_data_retrieval": {
+        "sql": "SELECT * FROM customers WHERE last_purchase_date >= '2024-01-01'",
+        "expected_rows": "~1,200",
+        "validation": "Check no nulls in key features"
+      },
+      "phase_2_feature_engineering": {
+        "automated_analysis": "Run analyze_feature_relevance(df, target=None) for clustering",
+        "feature_selection": "Use correlation + variance filters",
+        "transformations": "StandardScaler for all numeric features"
+      },
+      "phase_3_clustering": {
+        "algorithm": "KMeans(n_clusters=4, random_state=42, n_init=10)",
+        "validation": "Calculate silhouette_score (target >0.5)",
+        "visualization": "PCA 2D projection + elbow plot (for reference)"
+      },
+      "phase_4_analysis": {
+        "profiling": "Data-driven: top 5 features by variance from cluster mean",
+        "recommendations": "Marketing strategies based on actual cluster characteristics"
+      }
+    },
+
+    "identified_risks": [
+      {
+        "risk": "Class imbalance (85/15 split)",
+        "impact": "May need stratified sampling for ML",
+        "mitigation": "Use stratify parameter in train_test_split"
+      }
+    ],
+
+    "suggested_optimizations": [
+      {
+        "optimization": "Add silhouette analysis for k=2 to k=10",
+        "benefit": "Validates user's choice of k=4 against other values",
+        "effort": "Low (add 1 plot)"
+      }
+    ]
+  },
+
+  "refined_approach": {
+    "workflow_type": "multi_phase",
+    "phases": [
+      {
+        "phase": "data_retrieval",
+        "technical_spec": "SELECT * with date filter",
+        "am_key_considerations_addressed": ["Sufficient data", "Recent data only"]
+      }
+    ]
+  },
+
+  "questions_for_am": [
+    "Should we proceed with k=4 or show elbow plot first for validation?",
+    "Outlier treatment: remove or keep? (Business decision needed)"
+  ]
+}
+
+## PRINCIPLES
+
+1. Validate before committing - run test queries
+2. Be data-driven - use statistics, not assumptions
+3. Flag risks early - don't hide problems
+4. Suggest, don't override - AM sets strategy
+5. Be specific - provide exact approaches
+6. Think performance - consider speed, memory
+
+Return ONLY a single JSON object.
+"""
+
+SYSTEM_AM_FINAL_REVIEW = """
+You are the Analytics Manager (AM) performing final review.
+
+# YOUR ROLE: Validate DS's Technical Plan Aligns with Business Goals
+
+## YOU RECEIVE FROM DS:
+
+{
+  "ds_technical_review": {
+    "feasibility_validation": {...},
+    "technical_refinements": {...},
+    "identified_risks": [...],
+    "suggested_optimizations": [...]
+  }
+}
+
+## YOUR REVIEW CHECKLIST
+
+### CHECK 1: BUSINESS OBJECTIVE ALIGNMENT
+
+Does DS's plan achieve the business objective you set?
+
+Example:
+- You said: "Identify high-value customer segments for retention"
+- DS proposes: "KMeans clustering with k=4, profile by behavior features"
+- ✅ ALIGNED: Clustering will create segments, profiling will identify characteristics
+
+### CHECK 2: KEY CONSIDERATIONS ADDRESSED
+
+Did DS address all your warnings and suggestions?
+
+You said: "⚠️ Watch for outliers - might need separate treatment"
+DS response: "Identified risks: outlier treatment strategy - ask AM for decision"
+✅ ADDRESSED: DS flagged it back to you for business decision
+
+### CHECK 3: DELEGATED TASKS COMPLETED
+
+Did DS refine all tasks you assigned?
+
+You delegated: "Select behavior-related features"
+DS refined: "Correlation analysis >0.1, exclude features with >30% missing"
+✅ COMPLETED: Specific criteria provided
+
+### CHECK 4: RISK ACCEPTABILITY
+
+Are the risks DS identified acceptable for business goals?
+
+DS risk: "Class imbalance 85/15 - may affect model accuracy"
+Your assessment: "Acceptable - this is exploratory, not production model"
+✅ ACCEPTABLE
+
+### CHECK 5: OPTIMIZATION VALUE
+
+Do DS's suggested optimizations add business value?
+
+DS suggests: "Add silhouette analysis for k=2 to k=10"
+Business value: "Yes - validates k=4 choice, builds confidence"
+✅ APPROVE optimization
+
+DS suggests: "Run clustering 10 times with different seeds"
+Business value: "Minimal - adds complexity, user just wants segments"
+❌ REJECT optimization (nice-to-have, not critical)
+
+### CHECK 6: DELIVERABLE COMPLETENESS
+
+Will the output meet user expectations?
+
+User expects: "Customer segments with marketing recommendations"
+DS will provide: "4 segments with behavioral profiles + PCA visualization"
+⚠️ MISSING: Marketing recommendations (need to add to Phase 4)
+
+## DECISION FRAMEWORK
+
+**APPROVE if:**
+- Technical plan achieves business objective
+- All key considerations addressed
+- Risks are acceptable
+- Deliverables meet user needs
+
+**REVISE if:**
+- Missing critical deliverables
+- Approach doesn't align with objective
+- Unacceptable risks without mitigation
+- Over-complicated without business value
+
+**CLARIFY if:**
+- DS asks business questions (outlier treatment, etc.)
+- Need to adjust success criteria
+- Trade-offs require business decision
+
+## OUTPUT FORMAT
+
+{
+  "am_review_decision": "approve|revise|clarify",
+
+  "alignment_check": {
+    "business_objective": "✅ DS plan will achieve segment identification",
+    "key_considerations": "✅ All 4 considerations addressed",
+    "delegated_tasks": "✅ All tasks refined with technical specs",
+    "risk_acceptability": "✅ Risks are acceptable for exploratory analysis",
+    "optimization_value": "✅ Silhouette analysis approved, stability analysis rejected",
+    "deliverable_completeness": "⚠️ Missing marketing recommendations in Phase 4"
+  },
+
+  "feedback_to_ds": [
+    "✅ Excellent technical refinement - correlation analysis is data-driven",
+    "✅ Good catch on class imbalance - not critical for clustering but good awareness",
+    "⚠️ Please add marketing recommendations to Phase 4 deliverables",
+    "❌ Skip cluster stability analysis - adds complexity without business value"
+  ],
+
+  "business_decisions": {
+    "outlier_treatment": "Keep outliers - might represent VIP customers worth separate analysis",
+    "optimization_priority": "Approve silhouette analysis, focus on actionable insights over statistical rigor"
+  },
+
+  "final_direction": {
+    "proceed": true,
+    "adjustments": [
+      "Add Phase 4 step: Generate marketing recommendations per segment",
+      "Outlier handling: Keep outliers, flag in analysis if significant"
+    ]
+  }
+}
+
+## IF APPROVED:
+- Create consensus artifact with final approved plan
+- Pass to execution pipeline
+
+## IF REVISE NEEDED:
+- Provide specific feedback
+- DS refines and resubmits (max 3 iterations)
+
+## IF CLARIFICATION NEEDED:
+- Ask user directly for business decision
+- Wait for user input before proceeding
+
+Return ONLY a single JSON object.
+"""
+
+# ===== END AM-LED WORKFLOW PROMPTS =====
+
 SYSTEM_DS_GENERATE = """
 You are the Data Scientist (DS) generating SQL based on an APPROVED approach.
 
@@ -10552,6 +11052,250 @@ def preflight(task: str, proposal: dict) -> tuple[bool, str]:
     if not feats:
         return False, "No usable features after filtering."
     return True, ""
+
+
+# ======================
+# Data-Driven Feature Analysis (NEW - AM-LED FRAMEWORK)
+# ======================
+
+def analyze_feature_relevance_comprehensive(
+    df: pd.DataFrame,
+    target_col: str = None,
+    user_preferences: dict = None,
+    analysis_type: str = "supervised"
+) -> dict:
+    """
+    Comprehensive data-driven feature analysis with statistical validation.
+
+    Runs BEFORE feature engineering phase to guide agent decisions with actual data.
+
+    Args:
+        df: DataFrame to analyze
+        target_col: Target variable name (for supervised learning)
+        user_preferences: Dict with 'focus_features', 'algorithm', etc.
+        analysis_type: "supervised", "unsupervised", or "eda"
+
+    Returns:
+        Dict with target_analysis, feature_scores, recommendations, warnings
+    """
+    if user_preferences is None:
+        user_preferences = {}
+
+    analysis = {
+        'metadata': {
+            'total_features': len(df.columns),
+            'total_rows': len(df),
+            'analysis_type': analysis_type
+        },
+        'target_analysis': {},
+        'feature_scores': {},
+        'recommendations': {},
+        'warnings': []
+    }
+
+    # Target Variable Analysis (for supervised learning)
+    if target_col and analysis_type == "supervised":
+        if target_col not in df.columns:
+            analysis['warnings'].append({
+                'type': 'missing_target',
+                'severity': 'high',
+                'message': f"Target column '{target_col}' not found in dataset",
+                'recommendation': "Verify target column name or switch to unsupervised learning"
+            })
+            return analysis
+
+        target_unique = df[target_col].nunique()
+
+        if target_unique == 2:
+            target_type = 'binary_classification'
+        elif target_unique < 20:
+            target_type = 'multiclass_classification'
+        else:
+            target_type = 'regression'
+
+        analysis['target_analysis'] = {
+            'column': target_col,
+            'type': target_type,
+            'unique_values': int(target_unique),
+            'distribution': df[target_col].value_counts().head(10).to_dict(),
+            'missing_rate': float(df[target_col].isnull().mean())
+        }
+
+        # Check class imbalance
+        if target_type in ['binary_classification', 'multiclass_classification']:
+            value_counts = df[target_col].value_counts(normalize=True)
+            max_class_ratio = value_counts.max()
+            if max_class_ratio > 0.8:
+                analysis['warnings'].append({
+                    'type': 'class_imbalance',
+                    'severity': 'high' if max_class_ratio > 0.9 else 'medium',
+                    'message': f"Target is {max_class_ratio*100:.1f}% dominated by class {value_counts.idxmax()}",
+                    'recommendation': "Consider SMOTE, class weights, or stratified sampling"
+                })
+
+    # Feature Profiling
+    numeric_cols = df.select_dtypes(['number']).columns.tolist()
+    if target_col and target_col in numeric_cols:
+        numeric_cols.remove(target_col)
+
+    for col in numeric_cols:
+        score = {
+            'dtype': str(df[col].dtype),
+            'stats': {}
+        }
+
+        # Basic statistics
+        score['stats']['mean'] = float(df[col].mean()) if not df[col].isnull().all() else 0
+        score['stats']['std'] = float(df[col].std()) if not df[col].isnull().all() else 0
+        score['stats']['min'] = float(df[col].min()) if not df[col].isnull().all() else 0
+        score['stats']['max'] = float(df[col].max()) if not df[col].isnull().all() else 0
+        score['stats']['missing_rate'] = float(df[col].isnull().mean())
+        score['stats']['unique_values'] = int(df[col].nunique())
+        score['stats']['uniqueness_ratio'] = float(df[col].nunique() / len(df))
+
+        # Variance analysis
+        cv = df[col].std() / (df[col].mean() + 1e-6) if df[col].mean() != 0 and not df[col].isnull().all() else 0
+        score['stats']['coefficient_of_variation'] = float(cv)
+        score['variance_flag'] = 'low' if cv < 0.01 else 'medium' if cv < 0.5 else 'high'
+
+        # Pattern-based flags
+        score['flags'] = []
+        if any(pattern in col.lower() for pattern in ['_id', 'id$', 'uuid', 'guid', '^id$']):
+            score['flags'].append('id_like')
+        if df[col].nunique() <= 1:
+            score['flags'].append('constant')
+        if score['stats']['uniqueness_ratio'] > 0.95:
+            score['flags'].append('quasi_identifier')
+
+        # Correlation Analysis (if supervised)
+        if target_col and analysis_type == "supervised" and target_col in df.columns:
+            target_type = analysis['target_analysis']['type']
+
+            try:
+                if 'classification' in target_type:
+                    # Point-biserial correlation for categorical target
+                    try:
+                        from scipy.stats import pointbiserialr
+                        corr, p_val = pointbiserialr(
+                            df[target_col].fillna(df[target_col].mode()[0] if len(df[target_col].mode()) > 0 else 0),
+                            df[col].fillna(df[col].median())
+                        )
+                        score['correlation'] = {
+                            'value': float(corr),
+                            'abs_value': float(abs(corr)),
+                            'p_value': float(p_val),
+                            'significant': p_val < 0.05,
+                            'strength': 'strong' if abs(corr) > 0.3 else 'medium' if abs(corr) > 0.1 else 'weak'
+                        }
+                    except Exception as e:
+                        score['correlation'] = {'value': 0, 'error': f'calculation_failed: {str(e)}'}
+                else:
+                    # Pearson correlation for continuous target
+                    corr_df = df[[col, target_col]].corr()
+                    corr = corr_df.iloc[0, 1] if corr_df.shape[0] > 1 else 0
+                    score['correlation'] = {
+                        'value': float(corr),
+                        'abs_value': float(abs(corr)),
+                        'strength': 'strong' if abs(corr) > 0.5 else 'medium' if abs(corr) > 0.3 else 'weak'
+                    }
+            except Exception as e:
+                score['correlation'] = {'value': 0, 'error': str(e)}
+
+        # User Preference Matching
+        if user_preferences.get('focus_features'):
+            matches_focus = any(
+                keyword.lower() in col.lower()
+                for keyword in user_preferences['focus_features']
+            )
+            score['matches_user_focus'] = matches_focus
+        else:
+            score['matches_user_focus'] = False
+
+        # Overall Relevance Score
+        relevance = 0
+
+        # Correlation contribution
+        if analysis_type == "supervised" and 'correlation' in score and 'abs_value' in score['correlation']:
+            if score['correlation']['abs_value'] > 0.3:
+                relevance += 5
+            elif score['correlation']['abs_value'] > 0.1:
+                relevance += 3
+            elif score['correlation']['abs_value'] > 0.05:
+                relevance += 1
+
+        # Data quality contribution
+        if score['stats']['missing_rate'] < 0.1:
+            relevance += 2
+        elif score['stats']['missing_rate'] < 0.3:
+            relevance += 1
+
+        # Variance contribution
+        if score['variance_flag'] == 'high':
+            relevance += 2
+        elif score['variance_flag'] == 'medium':
+            relevance += 1
+
+        # User preference contribution
+        if score['matches_user_focus']:
+            relevance += 3
+
+        # Penalty for flags
+        if 'id_like' in score['flags']:
+            relevance -= 5
+        if 'constant' in score['flags']:
+            relevance -= 10
+        if 'quasi_identifier' in score['flags']:
+            relevance -= 3
+
+        score['relevance_score'] = max(0, relevance)
+
+        analysis['feature_scores'][col] = score
+
+    # Generate Recommendations
+    sorted_features = sorted(
+        [(col, score) for col, score in analysis['feature_scores'].items()],
+        key=lambda x: x[1]['relevance_score'],
+        reverse=True
+    )
+
+    must_include = [col for col, score in sorted_features if score['relevance_score'] >= 6]
+    should_consider = [col for col, score in sorted_features if 3 <= score['relevance_score'] < 6]
+    can_exclude = [col for col, score in sorted_features if score['relevance_score'] < 3]
+
+    analysis['recommendations'] = {
+        'must_include': must_include[:15],  # Top 15 features
+        'should_consider': should_consider[:10],
+        'can_exclude': can_exclude,
+        'feature_selection_summary': {
+            'total_analyzed': len(numeric_cols),
+            'highly_relevant': len(must_include),
+            'moderately_relevant': len(should_consider),
+            'low_relevance': len(can_exclude),
+            'recommended_count': len(must_include) + len(should_consider)
+        }
+    }
+
+    # Additional Warnings
+    if len(must_include) == 0:
+        analysis['warnings'].append({
+            'type': 'no_strong_features',
+            'severity': 'high',
+            'message': "No features with strong correlation to target found",
+            'recommendation': "Consider feature engineering (interactions, polynomials) or verify target variable"
+        })
+
+    if df.isnull().sum().sum() > 0:
+        high_missing = [col for col in numeric_cols if df[col].isnull().mean() > 0.3]
+        if high_missing:
+            analysis['warnings'].append({
+                'type': 'high_missing_values',
+                'severity': 'medium',
+                'columns': high_missing,
+                'message': f"{len(high_missing)} features have >30% missing values",
+                'recommendation': "Consider imputation strategy or feature exclusion"
+            })
+
+    return analysis
 
 
 # ======================
