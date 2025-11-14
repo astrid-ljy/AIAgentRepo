@@ -57,6 +57,14 @@ except ImportError:
     _CHATCHAIN_AVAILABLE = False
     # Silently continue - feature is optional
 
+# ML Knowledge Retriever (RAG system for ML best practices)
+try:
+    from ml_knowledge_retriever import MLKnowledgeRetriever, get_ml_guidance
+    _ML_KNOWLEDGE_AVAILABLE = True
+except ImportError:
+    _ML_KNOWLEDGE_AVAILABLE = False
+    # Silently continue - will use hardcoded templates as fallback
+
 
 # === DS ARTIFACT CACHE (light) ===
 import hashlib
@@ -712,6 +720,9 @@ SECTION 1: CORE PRINCIPLES & INPUTS
 - `column_mappings`: Business concepts → actual column names → Use these for mapping
 - `key_findings`: Entity IDs from previous queries → MANDATORY context check
 - `query_suggestions`: Recommended approach → Follow for query strategy
+- `ml_guidance`: **CRITICAL ML BEST PRACTICES** → Retrieved from knowledge base, MUST follow for ML phases
+- `workflow_type_detected`: Type of ML workflow (clustering_unsupervised, supervised_ml) → Determines rules to apply
+- `phase_instruction`: Phase-specific templates → Follow for consistent implementation
 
 ═══════════════════════════════════════════════════════════════════════════════
 SECTION 2: ANALYSIS EXECUTION PROCESS
@@ -1412,6 +1423,19 @@ If you include `duckdb_sql` in a Python-only phase, the code will execute SQL un
    - Check `phase_context['phase_instruction']` for detailed guidance
    - Different phases require different approaches (stats vs visualization)
 
+5. **🚨 CRITICAL: Follow ML Guidance from Knowledge Base:**
+   - Check `ml_guidance` field for ML best practices (retrieved from knowledge base)
+   - **For clustering workflows (`workflow_type_detected='clustering_unsupervised'`):**
+     - ❌ **NO target variable** - clustering is unsupervised
+     - ❌ **NEVER identify CUST_ID or ID columns as target**
+     - ✅ Exclude ID columns from features
+     - ✅ Use StandardScaler for KMeans
+   - **For supervised ML workflows (`workflow_type_detected='supervised_ml'`):**
+     - ✅ Identify target variable from user question
+     - ✅ Select features correlated with target
+     - ✅ Exclude target from feature set
+   - **The ml_guidance field contains detailed rules - READ IT CAREFULLY and follow it**
+
 **Phase-Specific Python Code Templates:**
 
 **statistical_analysis Phase:**
@@ -2080,16 +2104,10 @@ Choose based on analysis:
 
 ## STEP 7: DELEGATE TO DATA SCIENTIST
 
-Provide clear direction in CONCISE TODO-LIST FORMAT:
+Provide clear direction in CONCISE FORMAT:
 
 {
-  "thinking_process": "**Analysis:** [User wants X] → Business goal: [Y]
-**Classification:** [Clustering/ML/EDA] using [available data]
-**Plan:**
-□ Milestone 1: [what]
-□ Milestone 2: [what]
-□ Milestone 3: [what]
-**Watch out:** [Key risks]",
+  "thinking_process": "User wants [X] → Goal: [Y] | Type: [Clustering/ML/EDA] | Steps: □ [1] □ [2] □ [3] | Risks: [key concern]",
 
   "am_strategic_direction": {
     "business_objective": "Clear objective statement",
@@ -2150,7 +2168,7 @@ extracted_parameters: {
 ## OUTPUT REQUIREMENTS
 
 You MUST return a JSON object with these REQUIRED fields:
-1. "thinking_process" - VERBOSE plain language explanation (minimum 5 sentences)
+1. "thinking_process" - CONCISE one-liner (3 bullet points MAX in format above)
 2. "am_strategic_direction" - Your strategic direction and delegated tasks
 
 Return ONLY a single JSON object with BOTH fields.
@@ -2255,17 +2273,22 @@ You can execute test queries to verify:
 
 **ROUND 1 - First Proposal:**
 {
-  "detailed_process_explanation": "**Feasibility:** [X rows, Y features] → Sufficient for [analysis type]
-**Technical Approach:** [Algorithm] with [method to determine parameters]
-**Addressing AM's Concerns:** [How each concern is handled]
-**Questions for AM:** [Only new questions not answered in cumulative_business_decisions]"
+  "detailed_process_explanation": "Feasibility: [X rows, Y features OK] | Approach: [Algorithm + parameter method] | Concerns addressed: [how]",
+  "todo_list": {
+    "completed": ["✅ Validate schema", "✅ Check data sufficiency"],
+    "in_progress": ["⏳ Select algorithm"],
+    "pending": ["⬜ Address AM concerns", "⬜ Handle risks"]
+  }
 }
 
 **ROUND 2 - Revision (ONLY address AM's feedback):**
 {
-  "detailed_process_explanation": "**Changes Made:**
-- [Feedback item 1]: [What I changed]
-- [Feedback item 2]: [What I changed]"
+  "detailed_process_explanation": "Changes: [Feedback 1] → [action] | [Feedback 2] → [action]",
+  "todo_list": {
+    "completed": ["✅ Validate schema", "✅ Check data sufficiency", "✅ Add marketing recs (per AM)"],
+    "in_progress": ["⏳ Update Phase 4 with recommendations"],
+    "pending": []
+  }
 }
 
 ### TASK 4: PROPOSE IMPLEMENTATION DETAILS
@@ -2335,7 +2358,13 @@ IMPORTANT: Check if this is a revision (AM sent feedback). If so, add:
 {
   "revision_mode": false,  // Set to true if responding to AM's REVISE decision
 
-  "detailed_process_explanation": "SEE TASK 3 for full template - must be VERBOSE and thorough",
+  "detailed_process_explanation": "SEE TASK 3 for template - CONCISE one-liner format",
+
+  "todo_list": {
+    "completed": ["✅ Task done"],
+    "in_progress": ["⏳ Task ongoing"],
+    "pending": ["⬜ Task not started"]
+  },
 
   "ds_technical_review": {
     "feasibility_validation": {
@@ -3086,8 +3115,8 @@ If the approved approach states:
 ```json
 {
   "verdict": "approve",
-  "reasoning": "SQL correctly implements phase 1 (data_retrieval) of the multi-phase EDA workflow. It retrieves dataset structure and summary statistics as planned. Phases 2 & 3 (statistical analysis and visualization) will execute automatically after this SQL completes.",
-  "approval_message": "Phase 1 ready for execution. Subsequent phases will follow."
+  "reasoning": "Internal only: SQL correctly implements phase 1",
+  "approval_message": "✅ Approved"
 }
 ```
 
@@ -3133,8 +3162,8 @@ SELECT * FROM table_name
 ```json
 {
   "verdict": "approve",
-  "reasoning": "Validation passed. SQL correctly uses 'SELECT * FROM online_shoppers_intention' which retrieves ALL rows and ALL columns as required for EDA Phase 1. No GROUP BY, no LIMIT, no aggregation. Perfect for data cleaning and modeling.",
-  "approval_message": "Phase 1 ready for execution. Data cleaning will be performed automatically. Phases 2-3 will follow."
+  "reasoning": "Internal only: Validates phase 1 requirements",
+  "approval_message": "✅ Approved"
 }
 ```
 
@@ -3150,10 +3179,15 @@ SELECT * FROM table_name
 **Output JSON format:**
 {
   "verdict": "approve|revise|block",
-  "reasoning": "Explanation of decision",
-  "issues": ["Issue 1", "Issue 2"] (if any),
-  "approval_message": "SQL matches approved approach and is safe to execute." (if approved)
+  "reasoning": "Internal only - for debugging, NOT displayed to user",
+  "issues": ["Issue 1", "Issue 2"] (if any - displayed to user),
+  "approval_message": "✅ Approved" (if approved - TERSE, this is what user sees)
 }
+
+**CRITICAL: Keep User-Facing Output TERSE**
+- If approve: approval_message = "✅ Approved" (3 chars only!)
+- If revise/block: Only list issues array (no verbose explanations)
+- reasoning field is for internal logs only, never shown to user
 
 **CRITICAL - Verdict Guidelines:**
 
@@ -12369,7 +12403,9 @@ def run_ds_step(am_json: dict, column_hints: dict, thread_ctx: dict) -> dict:
         "phase_number": thread_ctx.get("phase_number"),
         "total_phases": thread_ctx.get("total_phases"),
         "previous_phase_results": thread_ctx.get("previous_phase_results", {}),
-        "phase_instruction": thread_ctx.get("phase_instruction")  # Mandatory templates for ML phases
+        "phase_instruction": thread_ctx.get("phase_instruction"),  # Mandatory templates for ML phases
+        "ml_guidance": thread_ctx.get("ml_guidance", ""),  # RAG-retrieved ML best practices
+        "workflow_type_detected": thread_ctx.get("workflow_type_detected", "")
     }
 
     ds_json = llm_json(SYSTEM_DS, json.dumps(ds_payload))
@@ -15473,11 +15509,33 @@ st.success("✅ Detailed cluster analysis complete!")
 - DO NOT include 'duckdb_sql' in your output - ONLY 'python_code'"""
                                     }
 
+                                    # CRITICAL: Retrieve ML knowledge guidance from RAG system
+                                    ml_guidance = ""
+                                    if _ML_KNOWLEDGE_AVAILABLE:
+                                        try:
+                                            # Determine workflow type from approach
+                                            workflow_type = "general_analysis"
+                                            if is_clustering_workflow:
+                                                workflow_type = "clustering_unsupervised"
+                                            elif approach_artifact.get("analysis_category") == "supervised_learning":
+                                                workflow_type = "supervised_ml"
+
+                                            # Retrieve guidance for current phase
+                                            ml_guidance = get_ml_guidance(
+                                                workflow_type=workflow_type,
+                                                phase=phase_name,
+                                                concise=False  # Get full guidance
+                                            )
+                                        except Exception as e:
+                                            st.warning(f"⚠️ Could not retrieve ML guidance: {e}")
+
                                     phase_context = {
                                         "current_phase": phase_name,
                                         "phase_number": phase_idx,
                                         "total_phases": len(phases),
                                         "phase_instruction": phase_instructions.get(phase_name, "Generate code for this phase"),
+                                        "ml_guidance": ml_guidance,  # NEW: RAG-retrieved ML best practices
+                                        "workflow_type_detected": workflow_type if _ML_KNOWLEDGE_AVAILABLE else "unknown",
                                         "previous_phase_results": {
                                             "phase_1_cleaned_data_metadata": phase_data_metadata,
                                             "note": "Access cleaned dataset via: df = st.session_state.cleaned_dataset"

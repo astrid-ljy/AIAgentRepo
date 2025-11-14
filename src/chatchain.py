@@ -267,6 +267,20 @@ class ChatChain:
                         if paragraph.strip():
                             self.add_msg_fn("assistant", paragraph.strip())
 
+                # Display DS's TODO list
+                if ds_review.get("todo_list"):
+                    todo = ds_review["todo_list"]
+                    self.add_msg_fn("assistant", "\n**📋 DS TODO List:**")
+                    if todo.get("completed"):
+                        for item in todo["completed"]:
+                            self.add_msg_fn("assistant", f"  {item}")
+                    if todo.get("in_progress"):
+                        for item in todo["in_progress"]:
+                            self.add_msg_fn("assistant", f"  {item}")
+                    if todo.get("pending"):
+                        for item in todo["pending"]:
+                            self.add_msg_fn("assistant", f"  {item}")
+
                 # Display DS's technical review summary
                 if ds_review.get("ds_technical_review"):
                     review = ds_review["ds_technical_review"]
@@ -435,9 +449,12 @@ class ChatChain:
                     # Try to extract phases from key_steps if they mention phases
                     if not approach.get("phases"):
                         if is_clustering:
-                            # Clustering/Segmentation phases - Unsupervised learning workflow
+                            # Clustering/Segmentation phases - Unsupervised learning workflow (5 phases)
                             # Phase 1: Retrieve ALL raw data (no target variable for unsupervised!)
-                            # Phases 2-4: Feature preparation, clustering, interpretation
+                            # Phase 2: Feature engineering for clustering
+                            # Phase 3: Apply clustering algorithm
+                            # Phase 4: Visualization
+                            # Phase 5: Business analysis and recommendations
                             approach["phases"] = [
                                 {
                                     "phase": "data_retrieval_and_cleaning",
@@ -445,19 +462,23 @@ class ChatChain:
                                 },
                                 {
                                     "phase": "feature_engineering",
-                                    "description": "Analyze features for clustering, handle categorical encoding (one-hot/label encoding), normalize/scale numerical features, select relevant features. Python only, NO SQL."
+                                    "description": "Select behavioral features (exclude ID columns), scale features using StandardScaler, create derived features if useful. NO target variable identification - clustering is unsupervised. Python only, NO SQL."
                                 },
                                 {
-                                    "phase": "clustering",
-                                    "description": "Apply clustering algorithm (KMeans, DBSCAN, or hierarchical), determine optimal number of clusters (elbow method, silhouette), assign cluster labels. Python only, NO SQL."
+                                    "phase": "clustering_execution",
+                                    "description": "Determine optimal k using elbow method (unless user specified), apply clustering algorithm (KMeans/DBSCAN), assign cluster labels, calculate silhouette score. Python only, NO SQL."
                                 },
                                 {
-                                    "phase": "cluster_analysis",
-                                    "description": "Profile each cluster (describe characteristics), calculate silhouette scores, visualize clusters (PCA/t-SNE), provide business recommendations for each segment. Python only, NO SQL."
+                                    "phase": "visualization",
+                                    "description": "Create PCA/t-SNE visualization of clusters, generate elbow plot (if k was determined), show cluster distribution bar chart. Python only, NO SQL."
+                                },
+                                {
+                                    "phase": "business_analysis",
+                                    "description": "Profile each cluster with plain-language descriptions, provide marketing recommendations for each segment, create comparison table, suggest retention strategies. Python only, NO SQL."
                                 }
                             ]
                             import streamlit as st
-                            st.info(f"🔍 Auto-detected Clustering workflow: {len(approach['phases'])} phases planned")
+                            st.info(f"🔍 Auto-detected Clustering workflow: {len(approach['phases'])} phases planned (including business analysis)")
                         elif is_ml:
                             # Supervised ML phases - Classification/Regression pipeline
                             # Phase 1: Retrieve ALL raw data (need both positive and negative examples!)
