@@ -14373,7 +14373,11 @@ def run_domain_agnostic_analysis(user_question: str):
                     "DS_GENERATE": SYSTEM_DS_GENERATE,  # SQL generation from approved approach
                     "DS_REVISE_SQL": SYSTEM_DS_REVISE_SQL,  # DS revises SQL based on Judge feedback
                     "JUDGE": SYSTEM_JUDGE,
-                    "VALIDATOR": SYSTEM_VALIDATOR  # Validator Agent for SQL validation
+                    "VALIDATOR": SYSTEM_VALIDATOR,  # Validator Agent for SQL validation
+                    # NEW AM-LED WORKFLOW PROMPTS
+                    "AM_STRATEGIC_DIRECTOR": SYSTEM_AM_STRATEGIC_DIRECTOR,  # AM leads with strategic direction
+                    "DS_TECHNICAL_ADVISOR": SYSTEM_DS_TECHNICAL_ADVISOR,  # DS validates and refines
+                    "AM_FINAL_REVIEW": SYSTEM_AM_FINAL_REVIEW  # AM reviews and approves
                 },
                 get_all_tables_fn=get_all_tables,
                 execute_readonly_fn=run_duckdb_sql,

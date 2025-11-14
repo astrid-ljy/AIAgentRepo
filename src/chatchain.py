@@ -164,6 +164,8 @@ class ChatChain:
             for turn in range(3):
                 # Step 1: AM analyzes and directs (only on first turn or if revisions needed)
                 if turn == 0:
+                    self.add_msg_fn("system", "🧠 AM is analyzing your request and setting strategic direction...")
+                    self.render_chat_fn()
                     am_direction = am_director_agent.propose_approach(user_question)
 
                     # Display AM's strategic direction
@@ -193,6 +195,8 @@ class ChatChain:
                     self.render_chat_fn()
 
                 # Step 2: DS validates and refines
+                self.add_msg_fn("system", "🔬 DS is validating feasibility and refining technical approach...")
+                self.render_chat_fn()
                 ds_review = ds_advisor_agent.refine_approach(
                     am_critique=am_direction,
                     original_approach=am_direction,
@@ -227,6 +231,8 @@ class ChatChain:
                 self.render_chat_fn()
 
                 # Step 3: AM reviews and approves/revises
+                self.add_msg_fn("system", "⚖️ AM is reviewing DS's plan for business alignment...")
+                self.render_chat_fn()
                 am_review = am_reviewer_agent.critique_approach(ds_review, user_question, dialogue_history)
 
                 # Display AM's review decision
