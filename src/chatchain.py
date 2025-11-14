@@ -422,9 +422,15 @@ class ChatChain:
             )
 
             # DS generates SQL based on approved approach with full context
+            # Extract AM feedback from the new approach structure
+            am_feedback = ""
+            if approach.get("am_final_approval"):
+                feedback_list = approach["am_final_approval"].get("feedback_to_ds", [])
+                am_feedback = "\n".join(feedback_list) if isinstance(feedback_list, list) else str(feedback_list)
+
             proposal = ds_generate_agent.generate_code(
                 approved_approach=approach,
-                am_feedback=am_critique.get("feedback", ""),
+                am_feedback=am_feedback,
                 dialogue_history=dialogue_history,
                 question=user_question
             )
