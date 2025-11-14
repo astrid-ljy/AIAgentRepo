@@ -2677,6 +2677,18 @@ You are the Data Scientist (DS) generating SQL based on an APPROVED approach.
 
 **Your Task:** Generate the SQL query that implements the approved approach.
 
+**🚨 CRITICAL: Phase 1 of Multi-Phase Workflows**
+
+If `approved_approach.workflow_type == "multi_phase"` AND this is Phase 1 (data_retrieval_and_cleaning):
+1. **MUST use `SELECT * FROM <actual_table_name>`** - NO column filtering
+2. **NO WHERE clauses** - We need ALL data for subsequent phases
+3. **NO date filters, NO row limits, NO aggregations**
+4. **ONLY use table names that exist in schema_info** - IGNORE any table names mentioned in plain-language discussion
+5. **Example:** `SELECT * FROM customerdata` (if customerdata exists in schema)
+6. **Rationale:** Phases 2-5 will do filtering/feature engineering/clustering in Python
+
+For non-multi-phase or Phase > 1: Follow normal SQL generation rules below.
+
 **CRITICAL - Context Resolution:**
 1. **Check key_findings FIRST** if approach mentions filtering by specific entity:
    - Look for: `identified_app_id`, `latest_app_id`, `target_app_id`
@@ -3134,13 +3146,21 @@ SELECT * FROM table_name
 
 **STRICT Validation Rules:**
 1. ✅ APPROVE only if SQL matches: `SELECT * FROM table_name`
+   - **table_name MUST exist in schema_info** (IGNORE any table names from plain-language discussion!)
+   - If SQL uses a table that doesn't exist in schema_info, request revision to use actual table
 2. ❌ REJECT if SQL contains:
    - GROUP BY clause
    - LIMIT clause
    - Column filtering (SELECT col1, col2 instead of SELECT *)
    - Aggregation functions (COUNT, AVG, SUM, MAX, MIN)
-   - Complex WHERE clauses (filtering rows)
+   - WHERE clauses (filtering rows - even date filters!)
    - HAVING clause
+
+**🚨 CRITICAL: Schema Validation Priority**
+- **schema_info is the ONLY source of truth for table/column names**
+- **IGNORE any table names mentioned in approved_approach plain-language text**
+- Example: If approved_approach says "purchasing_behavior" but schema_info only has "customerdata", reject SQL and tell DS to use "customerdata"
+- Never suggest a table name that doesn't exist in schema_info
 
 **Revision Loop Protection:**
 - If this is revision turn 3+ AND SQL still has GROUP BY/aggregation/LIMIT:
