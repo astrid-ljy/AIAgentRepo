@@ -156,27 +156,36 @@ class ChatChain:
                 context_builder=self.build_shared_context_fn
             )
 
-            # AM-led dialogue (max 3 iterations: AM → DS → AM review)
+            # AM-led dialogue (max 2 iterations: round 1 + 1 revision)
             approach = None
             dialogue_history = []
             am_direction = None
 
-            for turn in range(3):
+            for turn in range(2):
                 # Step 1: AM analyzes and directs (only on first turn or if revisions needed)
                 if turn == 0:
                     self.add_msg_fn("system", "🧠 AM is analyzing your request and setting strategic direction...")
                     self.render_chat_fn()
                     am_direction = am_director_agent.propose_approach(user_question)
 
+                    # Display AM's thinking process (verbose reasoning)
+                    if am_direction.get("thinking_process"):
+                        self._display_agent_message("AM", "**Strategic Analysis:**")
+                        thinking = am_direction["thinking_process"]
+                        # Split by paragraphs and display
+                        for paragraph in thinking.split("\n\n"):
+                            if paragraph.strip():
+                                self.add_msg_fn("assistant", paragraph.strip())
+
                     # Display AM's strategic direction
                     if am_direction.get("am_strategic_direction"):
                         direction = am_direction["am_strategic_direction"]
-                        self._display_agent_message("AM", f"Business Objective: {direction.get('business_objective', '')}")
+                        self.add_msg_fn("assistant", f"\n**Business Objective:** {direction.get('business_objective', '')}")
 
                         # Display delegated tasks
                         if direction.get("delegated_tasks"):
                             tasks = direction["delegated_tasks"]
-                            self.add_msg_fn("assistant", "**📋 Tasks for DS:**")
+                            self.add_msg_fn("assistant", "\n**📋 Tasks for DS:**")
                             for task in tasks.get("for_data_scientist", []):
                                 self.add_msg_fn("assistant", f"  - {task}")
 
@@ -186,10 +195,12 @@ class ChatChain:
                                 for consideration in tasks["key_considerations"]:
                                     self.add_msg_fn("assistant", f"  {consideration}")
 
-                        # Display extracted parameters
+                        # Display extracted parameters (only show non-null values)
                         if direction.get("extracted_parameters"):
                             params = direction["extracted_parameters"]
-                            self.add_msg_fn("assistant", f"\n**🎯 Extracted Parameters:** {params}")
+                            non_null_params = {k: v for k, v in params.items() if v is not None}
+                            if non_null_params:
+                                self.add_msg_fn("assistant", f"\n**🎯 Extracted Parameters:** {non_null_params}")
 
                     dialogue_history.append({"turn": turn + 1, "role": "am", "action": "direct", "content": am_direction})
                     self.render_chat_fn()
@@ -204,15 +215,23 @@ class ChatChain:
                     execute_fn=self.execute_readonly_fn
                 )
 
-                # Display DS's technical review
+                # Display DS's detailed process explanation
+                if ds_review.get("detailed_process_explanation"):
+                    self._display_agent_message("DS", "**Technical Response:**")
+                    explanation = ds_review["detailed_process_explanation"]
+                    # Split by paragraphs
+                    for paragraph in explanation.split("\n\n"):
+                        if paragraph.strip():
+                            self.add_msg_fn("assistant", paragraph.strip())
+
+                # Display DS's technical review summary
                 if ds_review.get("ds_technical_review"):
                     review = ds_review["ds_technical_review"]
-                    self._display_agent_message("DS", "Technical Feasibility Review:")
 
                     # Show feasibility validation
                     if review.get("feasibility_validation"):
                         validation = review["feasibility_validation"]
-                        self.add_msg_fn("assistant", f"**Schema Check:** {validation.get('schema_check', '')}")
+                        self.add_msg_fn("assistant", f"\n**Schema Check:** {validation.get('schema_check', '')}")
                         self.add_msg_fn("assistant", f"**Data Sufficiency:** {validation.get('data_sufficiency', '')}")
 
                     # Show identified risks
@@ -235,22 +254,33 @@ class ChatChain:
                 self.render_chat_fn()
                 am_review = am_reviewer_agent.critique_approach(ds_review, user_question, dialogue_history)
 
+                # Display AM's decision reasoning (verbose)
+                if am_review.get("decision_reasoning"):
+                    self._display_agent_message("AM", "**Review Analysis:**")
+                    reasoning = am_review["decision_reasoning"]
+                    # Split by paragraphs
+                    for paragraph in reasoning.split("\n\n"):
+                        if paragraph.strip():
+                            self.add_msg_fn("assistant", paragraph.strip())
+
                 # Display AM's review decision
                 if am_review.get("am_review_decision"):
                     decision = am_review["am_review_decision"]
-                    self._display_agent_message("AM", f"Decision: {decision.upper()}")
+                    self.add_msg_fn("assistant", f"\n**Decision: {decision.upper()}**")
 
                     # Show feedback
                     if am_review.get("feedback_to_ds"):
-                        self.add_msg_fn("assistant", "**Feedback:**")
-                        for feedback in am_review["feedback_to_ds"][:3]:
+                        self.add_msg_fn("assistant", "\n**Feedback:**")
+                        for feedback in am_review["feedback_to_ds"][:5]:
                             self.add_msg_fn("assistant", f"  {feedback}")
 
-                    # Show business decisions
+                    # Show business decisions (answers to DS questions)
                     if am_review.get("business_decisions"):
                         self.add_msg_fn("assistant", "\n**Business Decisions:**")
                         for key, value in am_review["business_decisions"].items():
-                            self.add_msg_fn("assistant", f"  - {key}: {value}")
+                            # Format key nicely (snake_case to Title Case)
+                            formatted_key = key.replace("_", " ").title()
+                            self.add_msg_fn("assistant", f"  - **{formatted_key}:** {value}")
 
                 dialogue_history.append({"turn": turn + 1, "role": "am", "action": "review", "content": am_review})
                 self.render_chat_fn()
@@ -283,15 +313,23 @@ class ChatChain:
                     }
                     break
 
-                # Check for max turns
-                if turn == 2:
-                    # Auto-approve after max turns
+                # Check for max turns (turn == 1 means this is round 2)
+                if turn == 1:
+                    # Auto-approve after round 2 (1 revision completed)
                     approach = {
                         "workflow_type": am_direction.get("am_strategic_direction", {}).get("workflow_type", "multi_phase"),
                         "approach_summary": am_direction.get("am_strategic_direction", {}).get("business_objective", ""),
+                        "am_strategic_direction": am_direction.get("am_strategic_direction", {}),
+                        "ds_technical_review": ds_review.get("ds_technical_review", {}),
+                        "am_final_approval": am_review,
                         "phases": ds_review.get("refined_approach", {}).get("phases", [])
                     }
-                    self.add_msg_fn("system", "⚠️ Max discussion turns reached. Proceeding with current approach.")
+
+                    # Check if AM approved or still wants revision
+                    if am_review.get("am_review_decision") != "approve":
+                        self.add_msg_fn("system", "⚠️ Max revisions reached (1). Auto-approving current approach.")
+
+                    self.add_msg_fn("system", "✅ Proceeding to execution...")
                     self.render_chat_fn()
                     break
 

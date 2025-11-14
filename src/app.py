@@ -2080,9 +2080,30 @@ Choose based on analysis:
 
 ## STEP 7: DELEGATE TO DATA SCIENTIST
 
-Provide clear direction in JSON format:
+Provide clear direction with VERBOSE REASONING in JSON format:
 
 {
+  "thinking_process": "DETAILED PLAIN LANGUAGE EXPLANATION:
+
+  The user is asking [describe request in detail].
+
+  Based on my analysis, the real business problem here is [explain deeper intent]. This suggests they want to [describe goal].
+
+  Looking at our data, we have [describe available data/tables]. This gives us [list relevant columns/features] that can help answer the question.
+
+  I'm classifying this as [analysis type] because [reasoning]. The goal is to [state clear objective].
+
+  The major milestones for this task are:
+  1. [Milestone 1] - [why important]
+  2. [Milestone 2] - [why important]
+  3. [Milestone 3] - [why important]
+
+  Key things to be mindful of:
+  - [Consideration 1 with detailed reasoning]
+  - [Consideration 2 with detailed reasoning]
+
+  I'm delegating to the DS team to handle the technical execution, with focus on [specific areas].",
+
   "am_strategic_direction": {
     "business_objective": "Clear objective statement",
     "workflow_type": "multi_phase|single_query",
@@ -2102,10 +2123,10 @@ Provide clear direction in JSON format:
     "expected_deliverables": ["Deliverable 1", "Deliverable 2"],
 
     "extracted_parameters": {
-      "n_clusters": 4,
-      "algorithm": "kmeans",
-      "focus_features": ["behavior"],
-      "target_variable": "revenue"
+      "n_clusters": null,
+      "algorithm": null,
+      "focus_features": null,
+      "target_variable": null
     },
 
     "context_utilization": {
@@ -2113,9 +2134,21 @@ Provide clear direction in JSON format:
       "entity_references": null,
       "reusable_work": null
     }
-  },
+  }
+}
 
-  "reasoning": "Step-by-step explanation of analysis and decisions"
+CRITICAL: In extracted_parameters, ONLY include values the user EXPLICITLY mentioned:
+- If user says "4 clusters" → n_clusters: 4
+- If user says "use random forest" → algorithm: "random_forest"
+- If user says "based on behavior" → focus_features: ["behavior"]
+- If user DOES NOT mention it → null (don't guess!!)
+
+Example - User: "do clustering analysis for customer who buys"
+extracted_parameters: {
+  "n_clusters": null,  // User didn't specify
+  "algorithm": null,  // User didn't specify
+  "focus_features": null,  // User didn't specify
+  "target_variable": null  // Clustering has no target
 }
 
 ## IMPORTANT PRINCIPLES
@@ -2190,9 +2223,49 @@ You can execute test queries to verify:
 - Scaling: StandardScaler (normal dist), RobustScaler (outliers), MinMaxScaler (bounded)
 - Encoding: one-hot (low cardinality), label (ordinal), target (high cardinality)
 
-### TASK 3: PROPOSE IMPLEMENTATION DETAILS
+### TASK 3: EXPLAIN FULL PROCESS IN PLAIN LANGUAGE
 
-Translate AM's high-level plan to technical specs.
+Provide a THOROUGH, VERBOSE explanation of your technical approach:
+
+{
+  "detailed_process_explanation": "FULL PLAIN LANGUAGE PROCESS:
+
+  Thank you AM for the strategic direction. Let me validate and refine the technical approach.
+
+  **Confirming AM's Key Points:**
+  - I see you want [restate AM objective]
+  - You've asked me to [list AM's delegated tasks]
+  - You've flagged [list AM's key considerations] - I'll address each below
+
+  **Feasibility Check:**
+  I've validated that [describe what you checked]. Based on schema analysis, we have [row count] rows with [list key columns]. This is [sufficient/insufficient] for [analysis type].
+
+  **My Proposed Technical Approach:**
+
+  For clustering analysis where user didn't specify number of clusters:
+  - I recommend starting with ELBOW METHOD to determine optimal k
+  - We'll test k=2 through k=10 and plot inertia
+  - Then select k where curve shows diminishing returns
+  - Alternatively, use silhouette score to validate
+
+  The full step-by-step process will be:
+  1. [Step 1 in plain language] - [why this matters]
+  2. [Step 2 in plain language] - [why this matters]
+  3. [Step 3 in plain language] - [why this matters]
+  4. [Step 4 in plain language] - [why this matters]
+
+  **Addressing AM's Considerations:**
+  - [Consideration 1]: My approach is [how you handle it]
+  - [Consideration 2]: My approach is [how you handle it]
+
+  **Questions I Need AM to Decide:**
+  - [Business question 1]
+  - [Business question 2]"
+}
+
+### TASK 4: PROPOSE IMPLEMENTATION DETAILS
+
+Translate full process to technical specs.
 
 Example - AM Task: "Select behavior features with correlation >0.1"
 
@@ -2245,7 +2318,20 @@ Propose improvements to AM's plan:
 
 ## OUTPUT FORMAT
 
+IMPORTANT: Check if this is a revision (AM sent feedback). If so, add:
 {
+  "revision_mode": true,
+  "addressing_feedback": [
+    "AM asked for marketing recommendations → Added to Phase 4",
+    "AM decided to keep outliers → Updated preprocessing plan"
+  ]
+}
+
+{
+  "revision_mode": false,  // Set to true if responding to AM's REVISE decision
+
+  "detailed_process_explanation": "SEE TASK 3 for full template - must be VERBOSE and thorough",
+
   "ds_technical_review": {
     "feasibility_validation": {
       "schema_check": "✅ All tables and columns exist",
@@ -2416,27 +2502,55 @@ DS will provide: "4 segments with behavioral profiles + PCA visualization"
 
 ## DECISION FRAMEWORK
 
+IMPORTANT: Check dialogue_history to see if this is round 2+ (revision).
+- If DS addressed your feedback from round 1 → APPROVE (don't keep revising)
+- Only REVISE if there are NEW issues not addressed
+
 **APPROVE if:**
 - Technical plan achieves business objective
 - All key considerations addressed
 - Risks are acceptable
 - Deliverables meet user needs
+- **OR this is round 2+ and DS addressed previous feedback**
 
-**REVISE if:**
+**REVISE if (ROUND 1 ONLY):**
 - Missing critical deliverables
 - Approach doesn't align with objective
 - Unacceptable risks without mitigation
 - Over-complicated without business value
 
+**NEVER REVISE if:**
+- This is round 2+ unless DS introduced NEW problems
+- DS already addressed your feedback (check revision_mode and addressing_feedback)
+- Your questions were answered
+
 **CLARIFY if:**
-- DS asks business questions (outlier treatment, etc.)
-- Need to adjust success criteria
-- Trade-offs require business decision
+- Need user input on business decision (not DS's fault)
 
 ## OUTPUT FORMAT
 
+CRITICAL: If DS asked questions_for_am, YOU MUST ANSWER THEM in business_decisions!
+
+Example - DS asked: "Should we proceed with k=4 or show elbow plot first?"
+You must answer: {"n_clusters_approach": "Use elbow method first, then select optimal k"}
+
 {
   "am_review_decision": "approve|revise|clarify",
+
+  "decision_reasoning": "VERBOSE EXPLANATION:
+
+  This is round [1|2|3]. In the previous round, I asked DS to [what you asked].
+
+  Looking at DS's response:
+  - [Point 1]: DS addressed this by [how they addressed it] → ✅ Satisfied
+  - [Point 2]: DS addressed this by [how they addressed it] → ✅ Satisfied
+  - [Point 3]: DS did not address [specific issue] → ⚠️ Still needs work
+
+  DS asked me these business questions:
+  - [Question 1]: My decision is [answer with reasoning]
+  - [Question 2]: My decision is [answer with reasoning]
+
+  Based on this analysis, my decision is [APPROVE/REVISE] because [clear reasoning].",
 
   "alignment_check": {
     "business_objective": "✅ DS plan will achieve segment identification",
@@ -2444,7 +2558,8 @@ DS will provide: "4 segments with behavioral profiles + PCA visualization"
     "delegated_tasks": "✅ All tasks refined with technical specs",
     "risk_acceptability": "✅ Risks are acceptable for exploratory analysis",
     "optimization_value": "✅ Silhouette analysis approved, stability analysis rejected",
-    "deliverable_completeness": "⚠️ Missing marketing recommendations in Phase 4"
+    "deliverable_completeness": "⚠️ Missing marketing recommendations in Phase 4",
+    "ds_questions_answered": "✅ All questions answered in business_decisions below"
   },
 
   "feedback_to_ds": [
@@ -2456,6 +2571,7 @@ DS will provide: "4 segments with behavioral profiles + PCA visualization"
 
   "business_decisions": {
     "outlier_treatment": "Keep outliers - might represent VIP customers worth separate analysis",
+    "n_clusters_approach": "Use elbow method first - don't assume k=4",
     "optimization_priority": "Approve silhouette analysis, focus on actionable insights over statistical rigor"
   },
 
@@ -2472,13 +2588,12 @@ DS will provide: "4 segments with behavioral profiles + PCA visualization"
 - Create consensus artifact with final approved plan
 - Pass to execution pipeline
 
-## IF REVISE NEEDED:
-- Provide specific feedback
-- DS refines and resubmits (max 3 iterations)
+## IF REVISE NEEDED (ROUND 1 ONLY):
+- Provide specific feedback on what's still missing
+- DS will address ONLY those points (incremental revision)
 
 ## IF CLARIFICATION NEEDED:
-- Ask user directly for business decision
-- Wait for user input before proceeding
+- Ask user directly for business decision (use this sparingly)
 
 Return ONLY a single JSON object.
 """
